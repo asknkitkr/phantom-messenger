@@ -19,10 +19,10 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Colour
 
-info()  { echo -e "${CYAN}[ℹ]${NC} $*"; }
-ok()    { echo -e "${GREEN}[✔]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[⚠]${NC} $*"; }
-fail()  { echo -e "${RED}[✖]${NC} $*"; exit 1; }
+info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
+ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+fail()  { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # ── Parse arguments ──────────────────────────────────────────────────
 MODE="run"   # run | test | install

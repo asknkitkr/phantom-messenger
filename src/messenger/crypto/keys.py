@@ -104,6 +104,8 @@ class KeyManager:
         """Encrypt and save keys to disk using the user's passphrase."""
         if self._signing_key is None or self._private_key is None:
             raise RuntimeError("No keys to save. Call generate() first.")
+        if (self._keys_dir / "identity.key").exists():
+            raise FileExistsError("An identity already exists; refusing to overwrite it.")
 
         # Derive an encryption key from the passphrase using Argon2id
         enc_key = self._derive_key(passphrase)

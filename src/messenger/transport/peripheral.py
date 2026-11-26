@@ -23,6 +23,8 @@ from messenger.config import (
     BLE_SERVICE_UUID,
     BLE_TX_CHAR_UUID,
     BLE_RX_CHAR_UUID,
+    HEADER_SIZE,
+    MAX_CHUNK_PAYLOAD,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,11 @@ class BaseTransport(ABC):
     def is_connected(self) -> bool:
         """Whether a peer is currently connected."""
 
+    @property
+    def max_chunk_payload(self) -> int:
+        """Maximum protocol payload that fits in one BLE write/notification."""
+        return MAX_CHUNK_PAYLOAD
+
 
 class BLEPeripheral(BaseTransport):
     """BLE Peripheral using Bless — acts as the GATT server.
@@ -77,6 +84,8 @@ class BLEPeripheral(BaseTransport):
         super().__init__()
         self._server = None
         self._connected = False
+        self._advertising = False
+        self._subscribers: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
@@ -109,7 +118,13 @@ class BLEPeripheral(BaseTransport):
         )
         tx_perms = GATTAttributePermissions.readable
         await self._server.add_new_characteristic(
-            BLE_SERVICE_UUID, BLE_TX_CHAR_UUID, tx_flags, None, tx_perms
+            BLE_SERVICE_UUID,
+            BLE_TX_CHAR_UUID,
+            tx_flags,
+            None,
+            tx_perms,
+            on_subscribe=self._on_subscribe,
+            on_unsubscribe=self._on_unsubscribe,
         )
 
         # RX characteristic — write (client pushes data to server)
@@ -123,27 +138,27 @@ class BLEPeripheral(BaseTransport):
         )
 
         await self._server.start()
-        self._connected = True
+        self._advertising = True
         logger.info("BLE peripheral started — advertising as '%s'", BLE_DEVICE_NAME)
-
-        if self._on_connect:
-            await self._on_connect()
 
     async def stop(self) -> None:
         """Stop advertising and disconnect."""
+        was_connected = self._connected
         if self._server:
             await self._server.stop()
             self._server = None
         self._connected = False
+        self._advertising = False
+        self._subscribers.clear()
         logger.info("BLE peripheral stopped.")
 
-        if self._on_disconnect:
+        if was_connected and self._on_disconnect:
             await self._on_disconnect()
 
     async def send(self, data: bytes) -> None:
         """Send data via TX characteristic notification."""
-        if self._server is None:
-            raise RuntimeError("Peripheral not started.")
+        if not self._server or not self.is_connected():
+            raise RuntimeError("No central is connected to the peripheral.")
 
         self._server.get_characteristic(BLE_TX_CHAR_UUID).value = data
         result = self._server.update_value(BLE_SERVICE_UUID, BLE_TX_CHAR_UUID)
@@ -155,7 +170,41 @@ class BLEPeripheral(BaseTransport):
     def is_connected(self) -> bool:
         return self._connected
 
-    def _on_read(self, characteristic, **kwargs) -> bytearray:
+    def is_advertising(self) -> bool:
+        return self._advertising
+
+    @property
+    def max_chunk_payload(self) -> int:
+        mtu = getattr(self._server, "mtu", None)
+        return min(MAX_CHUNK_PAYLOAD, max(1, (mtu or 23) - 3 - HEADER_SIZE))
+
+    def _on_subscribe(self, characteristic, session) -> None:
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(
+                self._set_subscriber, session.central_id, True
+            )
+
+    def _on_unsubscribe(self, characteristic, session) -> None:
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(
+                self._set_subscriber, session.central_id, False
+            )
+
+    def _set_subscriber(self, central_id: str, subscribed: bool) -> None:
+        was_connected = self._connected
+        if subscribed:
+            self._subscribers.add(central_id)
+        else:
+            self._subscribers.discard(central_id)
+        self._connected = bool(self._subscribers)
+
+        callback = self._on_connect if self._connected and not was_connected else None
+        if was_connected and not self._connected:
+            callback = self._on_disconnect
+        if callback:
+            asyncio.create_task(callback())
+
+    def _on_read(self, characteristic, request=None, **kwargs) -> bytearray:
         """Handle read request on TX characteristic."""
         try:
             char_uuid = getattr(characteristic, "uuid", str(characteristic))
@@ -164,7 +213,7 @@ class BLEPeripheral(BaseTransport):
         except Exception:
             return bytearray(b"")
 
-    def _on_write(self, characteristic, value, **kwargs) -> None:
+    def _on_write(self, characteristic, value, request=None, **kwargs) -> None:
         """Handle write to RX characteristic — peer sent us data."""
         data = bytes(value)
         char_uuid = getattr(characteristic, "uuid", str(characteristic)).split(":")[0].strip()
@@ -290,6 +339,11 @@ class BLECentral(BaseTransport):
 
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def max_chunk_payload(self) -> int:
+        mtu = getattr(self._client, "mtu_size", 23)
+        return min(MAX_CHUNK_PAYLOAD, max(1, mtu - 3 - HEADER_SIZE))
 
     def _handle_notification(self, sender, data: bytearray) -> None:
         """Handle incoming TX notification from the peripheral."""

@@ -39,7 +39,7 @@ BLE_RX_CHAR_UUID = "7e5c4a3b-2d1e-0f9a-8b7c-6d5e4f3a2b1e"  # Write  (client → 
 
 BLE_DEVICE_NAME = "Phantom"
 BLE_SCAN_TIMEOUT = 10.0  # seconds
-BLE_MTU = 120  # Safe MTU for macOS Write Without Response (can drop if >128)
+BLE_MAX_PACKET_SIZE = 120  # Cap protocol frames; effective size is also MTU-limited
 
 # ---------------------------------------------------------------------------
 # Crypto
@@ -51,9 +51,9 @@ KEY_SIZE = 32  # X25519 / XSalsa20 key size in bytes
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
-HEADER_SIZE = 7  # msg_type(1) + seq(2) + total(2) + payload_len(2)
+HEADER_SIZE = 11  # type(1) + transfer ID(4) + sequence(2) + total(2) + length(2)
 MAX_MESSAGE_LENGTH = 10_000  # characters, prevents abuse
-MAX_CHUNK_PAYLOAD = BLE_MTU - HEADER_SIZE
+MAX_CHUNK_PAYLOAD = BLE_MAX_PACKET_SIZE - HEADER_SIZE
 
 # ---------------------------------------------------------------------------
 # Database

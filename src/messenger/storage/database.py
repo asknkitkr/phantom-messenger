@@ -5,8 +5,8 @@ The entire database (messages, contacts, metadata) is encrypted with
 AES-256-CBC via SQLCipher. The encryption key is derived from the
 user's master passphrase.
 
-If SQLCipher is not available (missing C library), falls back to
-standard sqlite3 with a warning — useful for development/testing.
+If SQLCipher is not available, opening the database fails closed rather than
+writing private messages to an unencrypted SQLite file.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from messenger.storage.models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Try to import sqlcipher3; fall back to sqlite3 for development
+# Import SQLCipher, retaining sqlite3's connection type for static typing only.
 # ---------------------------------------------------------------------------
 try:
     import sqlcipher3 as sqlite3  # type: ignore[import-untyped]
@@ -130,6 +130,10 @@ class DatabaseManager:
         """
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if not HAS_SQLCIPHER:
+            logger.error("SQLCipher is required; refusing to open an unencrypted database.")
+            return False
+
         # Detect and resolve SQLCipher ↔ plain SQLite conflict
         if HAS_SQLCIPHER and self._db_path.exists() and self._is_plain_sqlite():
             logger.warning(
@@ -147,10 +151,9 @@ class DatabaseManager:
         self._conn = sqlite3.connect(str(self._db_path))
 
         # SQLCipher requires PRAGMA key to be the FIRST statement
-        if HAS_SQLCIPHER:
-            safe_pass = passphrase.replace("'", "''")
-            self._conn.execute(f"PRAGMA key='{safe_pass}'")
-            self._conn.execute(f"PRAGMA kdf_iter={SQLCIPHER_KDF_ITER}")
+        safe_pass = passphrase.replace("'", "''")
+        self._conn.execute(f"PRAGMA key='{safe_pass}'")
+        self._conn.execute(f"PRAGMA kdf_iter={SQLCIPHER_KDF_ITER}")
 
         # Verify we can read the database (will fail with wrong passphrase)
         # journal_mode and foreign_keys also trigger reads, so they must

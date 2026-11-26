@@ -13,6 +13,7 @@ Screens:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -38,7 +39,7 @@ from textual.widgets import (
     Static,
 )
 
-from messenger.config import DATA_DIR, MAX_MESSAGE_LENGTH
+from messenger.config import DATA_DIR, MAX_CHUNK_PAYLOAD, MAX_MESSAGE_LENGTH
 from messenger.crypto.keys import KeyManager
 from messenger.crypto.encryption import MessageEncryptor
 from messenger.storage.database import DatabaseManager
@@ -294,7 +295,7 @@ class LoginScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Container(
             Static("PHANTOM MESSENGER", id="login-title"),
-            Static("Offline  .  Encrypted  .  Secure", id="login-subtitle"),
+            Static("Private messages without an internet connection", id="login-subtitle"),
             Input(
                 placeholder="Enter your passphrase...",
                 password=True,
@@ -379,8 +380,8 @@ class MainScreen(Screen):
                 yield Static("  CONTACTS", id="sidebar-header")
                 yield ListView(id="contact-list")
                 yield Button("+ Scan", variant="primary", id="add-contact-btn")
-                yield Button("📡 Advertise", variant="default", id="advertise-btn")
-                yield Button("🔑 My Keys", variant="default", id="show-keys-btn")
+                yield Button("Advertise", variant="default", id="advertise-btn")
+                yield Button("My Keys", variant="default", id="show-keys-btn")
             with Vertical(id="right-panel"):
                 with Vertical(id="chat-panel"):
                     yield Static("  Select a contact", id="chat-header")
@@ -430,7 +431,7 @@ class MainScreen(Screen):
 
         if not MessageEncryptor.is_valid_text(text):
             self.notify(
-                "Only plain text allowed (no emoji or special characters).",
+                "Please use plain text. Emoji and some special characters aren't supported.",
                 severity="warning",
             )
             return
@@ -580,7 +581,7 @@ class ScanScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Container(
             Static("DEVICE SCANNER", id="scan-title"),
-            Static("Searching for nearby Phantom devices...", id="scan-status"),
+            Static("Looking for nearby devices...", id="scan-status"),
             ListView(id="scan-results"),
             Horizontal(
                 Button("Refresh", variant="primary", id="scan-refresh-btn"),
@@ -600,15 +601,16 @@ class ScanScreen(Screen):
         results_list = self.query_one("#scan-results", ListView)
         results_list.clear()
 
-        status.update("🔍 Scanning for BLE devices...")
+        status.update("Scanning for nearby devices...")
         refresh_btn = self.query_one("#scan-refresh-btn", Button)
         refresh_btn.disabled = True
-        refresh_btn.label = "⏳ Scanning..."
+        refresh_btn.label = "Scanning..."
         try:
             central = BLECentral()
             devices = await central.scan(timeout=5.0)
             if devices:
-                status.update(f"Found {len(devices)} device(s):")
+                count = len(devices)
+                status.update(f"Found {count} nearby {'device' if count == 1 else 'devices'}:")
                 for dev in devices:
                     item = ListItem(
                         Label(
@@ -732,7 +734,7 @@ class PhantomApp(App):
     """Phantom Messenger — the main Textual application."""
 
     TITLE = "Phantom Messenger"
-    SUB_TITLE = "Offline . Encrypted . Secure"
+    SUB_TITLE = "Private messages without an internet connection"
     CSS = APP_CSS
 
     BINDINGS = [
@@ -752,6 +754,7 @@ class PhantomApp(App):
         self.transport = transport
         self._assembler = ChunkAssembler()
         self._encryptors: dict[str, MessageEncryptor] = {}
+        self._pending_deliveries: dict[bytes, ChatMessage] = {}
 
 
     def on_unmount(self) -> None:
@@ -795,11 +798,8 @@ class PhantomApp(App):
     def handle_create_identity(self, message: LoginScreen.CreateIdentity) -> None:
         passphrase = message.passphrase
 
-        self.key_manager.generate()
-        self.key_manager.save(passphrase)
-
-        if not self.key_manager.load(passphrase):
-            self.notify("Failed to load newly created keys.", severity="error")
+        if self.key_manager.has_keys():
+            self.notify("An identity already exists. Unlock it to continue.", severity="warning")
             return
 
         if not self.db_manager.open(passphrase):
@@ -807,6 +807,13 @@ class PhantomApp(App):
                 f"Failed to create database: check {DATA_DIR / 'phantom.log'}",
                 severity="error",
             )
+            return
+
+        self.key_manager.generate()
+        self.key_manager.save(passphrase)
+
+        if not self.key_manager.load(passphrase):
+            self.notify("Failed to load newly created keys.", severity="error")
             return
 
         self.notify(
@@ -871,35 +878,32 @@ class PhantomApp(App):
         # Encrypt and send via BLE (if connected)
         if self.transport and self.transport.is_connected():
             self._send_encrypted(contact, chat_msg)
-        else:
-            # No BLE connection — save as delivered locally
-            chat_msg.status = MessageStatus.DELIVERED
-            self.db_manager.update_message_status(chat_msg.id, chat_msg.status)
-            self._refresh_chat(contact.id)
+        # Otherwise it remains pending locally and is not reported as delivered.
 
     @work(thread=False)
     async def _send_encrypted(self, contact: Contact, chat_msg: ChatMessage) -> None:
         """Encrypt and send a message via BLE transport."""
+        delivery_id: bytes | None = None
         try:
             encryptor = self._get_encryptor(contact)
             encrypted = encryptor.encrypt(chat_msg.content)
+            delivery_id = hashlib.sha256(encrypted).digest()
 
-            chunks = chunk_message(MessageType.TEXT_MESSAGE, encrypted)
+            chunks = self._chunk_message(MessageType.TEXT_MESSAGE, encrypted)
 
             if self.transport and self.transport.is_connected():
+                self._pending_deliveries[delivery_id] = chat_msg
                 for chunk in chunks:
                     await self.transport.send(chunk.to_bytes())
-
-                # Mark as delivered
-                chat_msg.status = MessageStatus.DELIVERED
             else:
-                chat_msg.status = MessageStatus.FAILED
-                logger.warning("Not connected. Message queued.")
+                logger.info("Not connected; message remains pending.")
 
         except Exception as exc:
+            if delivery_id is not None:
+                self._pending_deliveries.pop(delivery_id, None)
             logger.error("Failed to send message: %s", exc)
-            chat_msg.status = MessageStatus.FAILED
-            logger.error(f"Send failed: {exc}")
+            if chat_msg.status != MessageStatus.DELIVERED:
+                chat_msg.status = MessageStatus.FAILED
 
         self.db_manager.update_message_status(chat_msg.id, chat_msg.status)
         self._refresh_chat(contact.id)
@@ -941,7 +945,7 @@ class PhantomApp(App):
             try:
                 # Send our key bundle
                 bundle = json.dumps(self.key_manager.get_public_bundle()).encode()
-                chunks = chunk_message(MessageType.KEY_EXCHANGE, bundle)
+                chunks = self._chunk_message(MessageType.KEY_EXCHANGE, bundle)
                 for chunk in chunks:
                     await central.send(chunk.to_bytes())
 
@@ -976,7 +980,25 @@ class PhantomApp(App):
         elif msg_type == MessageType.TEXT_MESSAGE:
             await self._handle_text_message(payload)
         elif msg_type == MessageType.ACK:
-            pass  # TODO: handle delivery ACKs
+            if len(payload) == 96:
+                delivery_id, signature = payload[:32], payload[32:]
+                message = self._pending_deliveries.get(delivery_id)
+                contact = self.db_manager.get_contact(message.contact_id) if message else None
+                if contact is not None:
+                    try:
+                        from nacl.encoding import HexEncoder
+                        from nacl.signing import VerifyKey
+
+                        VerifyKey(contact.verify_key.encode(), encoder=HexEncoder).verify(
+                            delivery_id, signature
+                        )
+                    except Exception:
+                        logger.warning("Ignoring an invalid delivery acknowledgement.")
+                    else:
+                        self._pending_deliveries.pop(delivery_id, None)
+                        message.status = MessageStatus.DELIVERED
+                        self.db_manager.update_message_status(message.id, message.status)
+                        self.call_later(lambda c=message.contact_id: self._refresh_chat(c))
 
     async def _handle_key_exchange(self, payload: bytes) -> None:
         """Handle an incoming key exchange bundle."""
@@ -1008,7 +1030,7 @@ class PhantomApp(App):
                 my_bundle = self.key_manager.get_public_bundle()
                 my_bundle["reply"] = False
                 reply_payload = json.dumps(my_bundle).encode()
-                chunks = chunk_message(MessageType.KEY_EXCHANGE, reply_payload)
+                chunks = self._chunk_message(MessageType.KEY_EXCHANGE, reply_payload)
                 for chunk in chunks:
                     await self.transport.send(chunk.to_bytes())
 
@@ -1049,6 +1071,14 @@ class PhantomApp(App):
                 continue
 
         if matched_contact:
+            if self.transport and self.transport.is_connected():
+                delivery_id = hashlib.sha256(payload).digest()
+                signature = self.key_manager.signing_key.sign(delivery_id).signature
+                ack_chunks = self._chunk_message(
+                    MessageType.ACK, delivery_id + signature
+                )
+                for chunk in ack_chunks:
+                    await self.transport.send(chunk.to_bytes())
             # Schedule UI refresh via call_later so Textual's active_app context is set
             self.call_later(self._refresh_ui)
             self.call_later(lambda c=matched_contact: self._refresh_chat(c.id))
@@ -1062,7 +1092,7 @@ class PhantomApp(App):
     @on(MainScreen.StartAdvertise)
     def handle_start_advertise(self, message: MainScreen.StartAdvertise) -> None:
         """Handle the Advertise button — start BLE peripheral."""
-        if self.transport and isinstance(self.transport, BLEPeripheral) and self.transport.is_connected():
+        if self.transport and isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
             logger.warning("Already advertising!")
             return
 
@@ -1073,7 +1103,7 @@ class PhantomApp(App):
         # Update button label
         try:
             btn = self.query_one("#advertise-btn", Button)
-            btn.label = "📡 Advertising…"
+            btn.label = "Advertising..."
             btn.variant = "success"
         except NoMatches:
             pass
@@ -1095,7 +1125,7 @@ class PhantomApp(App):
                 # Reset button
                 try:
                     btn = self.query_one("#advertise-btn", Button)
-                    btn.label = "📡 Advertise"
+                    btn.label = "Advertise"
                     btn.variant = "default"
                 except NoMatches:
                     pass
@@ -1119,6 +1149,14 @@ class PhantomApp(App):
                 signing_key=self.key_manager.signing_key,
             )
         return self._encryptors[contact.id]
+
+    def _chunk_message(self, msg_type: MessageType, payload: bytes) -> list[Chunk]:
+        max_payload = (
+            self.transport.max_chunk_payload
+            if self.transport is not None
+            else MAX_CHUNK_PAYLOAD
+        )
+        return chunk_message(msg_type, payload, max_payload_size=max_payload)
 
     def _refresh_ui(self) -> None:
         """Refresh the sidebar contacts list."""

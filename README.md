@@ -1,25 +1,23 @@
-# Phantom Messenger 👻
+# Phantom Messenger
 
-**Offline · Encrypted · Secure**
+Private messages over Bluetooth LE. No internet connection required.
 
-A peer-to-peer encrypted messaging application that works entirely **without internet or cellular networks**. Messages are transmitted over **Bluetooth Low Energy (BLE)** and encrypted end-to-end using military-grade cryptography.
+Phantom Messenger lets nearby devices exchange encrypted text messages over Bluetooth Low Energy (BLE). It works without an internet or cellular connection.
 
 > [!NOTE]
-> Phantom Messenger is designed for scenarios where internet access is unavailable, unreliable, or untrusted — disaster zones, protests, secure facilities, or simply communicating with someone in the same building without network dependency.
+> It can be useful when internet access is unavailable or when you want to message someone nearby without using a network.
 
-## ✨ Features
+## Features
 
-- **Zero Internet Required** — communicates exclusively via Bluetooth LE
-- **End-to-End Encryption** — XSalsa20-Poly1305 authenticated encryption (libsodium)
-- **Digital Signatures** — Ed25519 signatures verify sender identity
-- **Encrypted Database** — all messages stored in AES-256 encrypted SQLCipher database
-- **Cross-Platform** — works on Windows, macOS, and Linux
-- **Text Only** — plain text messages only, no emoji or images (by design)
-- **Passphrase Protected** — identity keys encrypted with Argon2id key derivation
-- **Real-Time Messaging** — incoming messages appear instantly
-- **Terminal UI** — clean, modern TUI built with [Textual](https://textual.textualize.io/)
+- **Works offline:** devices communicate directly over Bluetooth LE.
+- **Private messages:** messages are encrypted and signed using libsodium.
+- **Encrypted storage:** SQLCipher protects locally stored messages and contacts.
+- **Runs on Windows, macOS, and Linux:** Bluetooth support depends on the operating system and adapter.
+- **Text only:** messages cannot include images or attachments; emoji and some special characters are not supported.
+- **Passphrase protected:** identity keys are encrypted with a key derived using Argon2id.
+- **Terminal app:** the interface is built with [Textual](https://textual.textualize.io/).
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -40,28 +38,26 @@ A peer-to-peer encrypted messaging application that works entirely **without int
 │    │ (Advertise)  │  │ (Scan+Connect)│           │
 │    └─────────────┘  └──────────────┘            │
 └─────────────────────────────────────────────────┘
-         ↕ Bluetooth Low Energy (no internet!)
+         ↕ Bluetooth Low Energy
 ```
 
 ### How It Works
 
 1. **Device A** starts advertising as a BLE Peripheral (GATT server)
 2. **Device B** scans for nearby Phantom devices as a BLE Central
-3. **Key Exchange** happens automatically over BLE — both devices swap X25519 public keys and Ed25519 verification keys
-4. **Shared Secret** is derived via X25519 Diffie-Hellman — never transmitted
-5. **Messages** are encrypted with XSalsa20-Poly1305, signed with Ed25519, chunked into BLE packets, and sent over GATT characteristics
-6. **Storage** — all messages and contacts are persisted in a locally encrypted SQLCipher database
+3. The devices exchange their X25519 and Ed25519 public keys over BLE.
+4. Each device derives the same shared secret locally using X25519; the secret is never sent.
+5. Messages are encrypted, signed, split into BLE packets, and sent over GATT.
+6. Contacts and messages are stored in the encrypted SQLCipher database.
 
 ### BLE Transport Protocol
 
-Messages are split into chunks that fit within the BLE MTU:
+Messages are split into chunks sized for the negotiated BLE connection:
 
 ```
-Chunk format (7-byte header + payload):
-┌──────────────┬───────────┬──────────┬─────────────┬─────────┐
-│ msg_type (1B)│ seq (2B)  │total (2B)│ payload_len │ payload │
-│              │           │          │    (2B)     │ (≤113B) │
-└──────────────┴───────────┴──────────┴─────────────┴─────────┘
+Chunk format (11-byte header + payload):
+[type: 1 byte][transfer ID: 4 bytes][sequence: 2 bytes]
+[total chunks: 2 bytes][payload length: 2 bytes][payload]
 
 Message types:
   0x01 = KEY_EXCHANGE    (public key bundle as JSON)
@@ -75,7 +71,7 @@ Message types:
 [nonce: 24 bytes][ciphertext + MAC: variable][signature: 64 bytes]
 ```
 
-## 🔒 Security Model
+## Security Model
 
 | Layer | Algorithm | Purpose |
 |-------|-----------|---------|
@@ -87,7 +83,7 @@ Message types:
 
 All cryptographic operations use the well-audited **[libsodium](https://libsodium.org/)** library via [PyNaCl](https://pynacl.readthedocs.io/) bindings. No custom cryptography is implemented.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### One-Command Setup (Recommended)
 
@@ -146,7 +142,7 @@ python -m messenger --mode loopback
 python -m messenger --debug
 ```
 
-## 📖 Usage Guide
+## Usage Guide
 
 ### First Time Setup
 
@@ -162,9 +158,9 @@ python -m messenger --debug
 | Device A (Advertiser) | Device B (Scanner) |
 |---|---|
 | `./run.sh` → Log in | `./run.sh` → Log in |
-| Click **📡 Advertise** | Click **+ Scan** |
+| Click **Advertise** | Click **+ Scan** |
 | Wait for connection... | Select Device A from list |
-| ✅ Key exchange happens automatically! | ✅ Contact appears in sidebar |
+| The devices exchange keys automatically. | The new contact appears in the sidebar. |
 
 **Via Manual Key Exchange:**
 
@@ -177,9 +173,9 @@ python -m messenger --debug
 1. Select a contact from the sidebar
 2. Type your message in the input bar
 3. Press **Enter** or click **Send**
-4. Only plain text is allowed (no emoji — by design for security)
+4. Messages must be plain text. Emoji and some special characters are not supported.
 
-## ⌨️ Key Bindings
+## Key Bindings
 
 | Key | Action |
 |-----|--------|
@@ -189,7 +185,7 @@ python -m messenger --debug
 | `Enter` | Send message |
 | `Escape` | Close dialog/go back |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 phantom-messenger/
@@ -224,33 +220,34 @@ phantom-messenger/
                            #   ScanScreen, ManualAddScreen + PhantomApp
 ```
 
-## 🔧 Configuration
+## Configuration
 
 All configuration is in [`src/messenger/config.py`](src/messenger/config.py):
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `BLE_MTU` | 120 | Safe BLE packet size for macOS compatibility |
+| `BLE_MAX_PACKET_SIZE` | 120 | Maximum protocol frame size before negotiated MTU limits |
 | `BLE_SCAN_TIMEOUT` | 10s | How long to scan for devices |
 | `MAX_MESSAGE_LENGTH` | 10,000 | Max characters per message |
 | `PBKDF2_ITERATIONS` | 600,000 | Key derivation iterations (OWASP recommended) |
 | `SQLCIPHER_KDF_ITER` | 256,000 | Database encryption iterations |
 
-## 🖥️ Platform Notes
+## Platform Notes
 
 ### macOS
 - Grant Bluetooth access: **System Settings → Privacy & Security → Bluetooth**
-- Tested on macOS 12+ (Monterey and later)
+- Bleak's supported baseline is macOS 10.15+; this app has been tested on macOS 12+ only
 - Uses CoreBluetooth via Bless/Bleak
 
 ### Linux
 - Add your user to the `bluetooth` group: `sudo usermod -aG bluetooth $USER`
-- BlueZ 5.43+ required
+- BlueZ 5.55+ required by the current Bleak baseline
 - May need `sudo` for BLE advertising
 
 ### Windows
-- Requires Windows 10+ with Bluetooth support
+- Bleak's current tested baseline is Windows 11 (build 22000+) with Bluetooth support
 - Grant Bluetooth access if prompted by Windows Security
+- Bless installs its Windows BLE backend dependencies with the project
 
 ## Running Tests
 
@@ -262,10 +259,10 @@ python -m pytest tests/ -v
 python -m pytest tests/ -v --cov=messenger
 ```
 
-## 📜 License
+## License
 
 [MIT](LICENSE) — see [LICENSE](LICENSE) for details.
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
