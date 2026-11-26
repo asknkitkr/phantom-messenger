@@ -70,6 +70,7 @@ from messenger.transport.protocol import (
     chunk_message,
     Chunk,
 )
+from messenger.transport.mesh import RelayEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -1314,6 +1315,7 @@ class PhantomApp(App):
         self._encryptors: dict[str, MessageEncryptor] = {}
         self._pending_deliveries: dict[bytes, ChatMessage] = {}
         self._sending_message_ids: set[str] = set()
+        self._connected_contact_id: str | None = None
 
 
     def on_unmount(self) -> None:
@@ -1632,11 +1634,22 @@ class PhantomApp(App):
         try:
             encryptor = self._get_encryptor(contact)
             encrypted = encryptor.encrypt(chat_msg.content)
-            delivery_id = hashlib.sha256(encrypted).digest()
-
-            chunks = self._chunk_message(MessageType.TEXT_MESSAGE, encrypted)
-
             if self.transport and self.transport.is_connected():
+                delivery_id = hashlib.sha256(chat_msg.id.encode("utf-8")).digest()
+                relay = RelayEnvelope.create(
+                    "message",
+                    self.key_manager.identity_hex,
+                    contact.verify_key,
+                    encrypted,
+                    packet_id=delivery_id.hex(),
+                )
+                self.db_manager.remember_relay(relay.packet_id)
+                self.db_manager.queue_relay(
+                    relay.packet_id,
+                    relay.encode(),
+                    self._connected_peer_public_key(),
+                )
+                chunks = self._chunk_message(MessageType.RELAY_MESSAGE, relay.encode())
                 self._pending_deliveries[delivery_id] = chat_msg
                 for chunk in chunks:
                     await self.transport.send(chunk.to_bytes())
@@ -1749,26 +1762,72 @@ class PhantomApp(App):
         elif msg_type == MessageType.TEXT_MESSAGE:
             await self._handle_text_message(payload)
         elif msg_type == MessageType.ACK:
-            if len(payload) == 96:
-                delivery_id, signature = payload[:32], payload[32:]
-                message = self._pending_deliveries.get(delivery_id)
-                contact = self.db_manager.get_contact(message.contact_id) if message else None
-                if contact is not None:
-                    try:
-                        from nacl.encoding import HexEncoder
-                        from nacl.signing import VerifyKey
+            self._handle_ack_payload(payload)
+        elif msg_type == MessageType.RELAY_MESSAGE:
+            await self._handle_relay_packet(payload)
 
-                        VerifyKey(contact.verify_key.encode(), encoder=HexEncoder).verify(
-                            delivery_id, signature
-                        )
-                    except Exception:
-                        logger.warning("Ignoring an invalid delivery acknowledgement.")
-                    else:
-                        self._pending_deliveries.pop(delivery_id, None)
-                        message.status = MessageStatus.DELIVERED
-                        self.db_manager.update_message_status(message.id, message.status)
-                        self._set_connection_status(self._connection_status_text)
-                        self.call_later(lambda c=message.contact_id: self._refresh_chat(c))
+    def _handle_ack_payload(self, payload: bytes) -> None:
+        if len(payload) != 96:
+            return
+        delivery_id, signature = payload[:32], payload[32:]
+        message = self._pending_deliveries.get(delivery_id)
+        contact = self.db_manager.get_contact(message.contact_id) if message else None
+        if contact is None:
+            return
+        try:
+            from nacl.encoding import HexEncoder
+            from nacl.signing import VerifyKey
+
+            VerifyKey(contact.verify_key.encode(), encoder=HexEncoder).verify(delivery_id, signature)
+        except Exception:
+            logger.warning("Ignoring an invalid delivery acknowledgement.")
+            return
+        self._pending_deliveries.pop(delivery_id, None)
+        self.db_manager.delete_queued_relay(delivery_id.hex())
+        message.status = MessageStatus.DELIVERED
+        self.db_manager.update_message_status(message.id, message.status)
+        self._set_connection_status(self._connection_status_text)
+        self.call_later(lambda c=message.contact_id: self._refresh_chat(c))
+
+    async def _handle_relay_packet(self, payload: bytes) -> None:
+        if self._connected_contact_id is None:
+            logger.warning("Ignoring relay packet from an unverified connection.")
+            return
+        envelope = RelayEnvelope.decode(payload)
+        is_new = self.db_manager.remember_relay(envelope.packet_id)
+        if envelope.destination == self.key_manager.identity_hex:
+            if envelope.kind == "message":
+                delivery_id = bytes.fromhex(envelope.packet_id)
+                if is_new:
+                    delivered = await self._handle_text_message(
+                        envelope.payload, envelope.source, delivery_id
+                    )
+                    if not delivered:
+                        self.db_manager.forget_relay(envelope.packet_id)
+                else:
+                    await self._send_relay_ack(envelope.source, delivery_id)
+            else:
+                if not is_new:
+                    return
+                self._handle_ack_payload(envelope.payload)
+            return
+        if envelope.hops_left <= 0:
+            return
+        incoming_peer = self._connected_peer_public_key()
+        if not is_new:
+            prior = next(
+                (via for packet_id, _, via in self.db_manager.get_queued_relays() if packet_id == envelope.packet_id),
+                None,
+            )
+            if prior == incoming_peer:
+                return
+        envelope.hops_left -= 1
+        self.db_manager.queue_relay(
+            envelope.packet_id,
+            envelope.encode(),
+            incoming_peer,
+        )
+        self.notify("Encrypted message saved for relay to a later contact.", severity="information")
 
     async def _handle_key_exchange(self, payload: bytes) -> None:
         """Handle an incoming key exchange bundle."""
@@ -1804,6 +1863,7 @@ class PhantomApp(App):
             return
         contact.last_seen = time.time()
         self.db_manager.save_contact(contact)
+        self._connected_contact_id = contact.id
         self.call_later(self._refresh_ui)
 
         if bundle.get("reply", True) and self.transport and self.transport.is_connected():
@@ -1812,6 +1872,7 @@ class PhantomApp(App):
             payload = json.dumps(my_bundle).encode()
             for chunk in self._chunk_message(MessageType.KEY_EXCHANGE, payload):
                 await self.transport.send(chunk.to_bytes())
+        await self._forward_queued_relays(contact)
         await self._flush_pending_messages(contact)
 
     @staticmethod
@@ -1824,16 +1885,37 @@ class PhantomApp(App):
         if not self.transport or not self.transport.is_connected():
             return
         awaiting_ack = {message.id for message in self._pending_deliveries.values()}
-        for message in self.db_manager.get_undelivered_messages(contact.id):
-            if not self.transport.is_connected():
-                break
-            if message.id in awaiting_ack or message.id in self._sending_message_ids:
-                continue
-            message.status = MessageStatus.PENDING
-            self.db_manager.update_message_status(message.id, message.status)
-            await self._transmit_message(contact, message)
+        for target in self.db_manager.get_all_contacts():
+            for message in self.db_manager.get_undelivered_messages(target.id):
+                if not self.transport.is_connected():
+                    return
+                if message.id in awaiting_ack or message.id in self._sending_message_ids:
+                    continue
+                message.status = MessageStatus.PENDING
+                self.db_manager.update_message_status(message.id, message.status)
+                await self._transmit_message(target, message)
 
-    async def _handle_text_message(self, payload: bytes) -> None:
+    async def _forward_queued_relays(self, peer: Contact) -> None:
+        if not self.transport or not self.transport.is_connected():
+            return
+        for packet_id, raw, via in self.db_manager.get_queued_relays():
+            if via == peer.public_key:
+                continue
+            envelope = RelayEnvelope.decode(raw)
+            if envelope.hops_left <= 0:
+                continue
+            envelope.hops_left -= 1
+            forwarded = envelope.encode()
+            for chunk in self._chunk_message(MessageType.RELAY_MESSAGE, forwarded):
+                await self.transport.send(chunk.to_bytes())
+            self.db_manager.queue_relay(packet_id, forwarded, peer.public_key)
+
+    async def _handle_text_message(
+        self,
+        payload: bytes,
+        expected_source: str | None = None,
+        relay_delivery_id: bytes | None = None,
+    ) -> bool:
         """Decrypt and store an incoming text message."""
         from nacl.signing import VerifyKey
         from nacl.encoding import HexEncoder
@@ -1842,6 +1924,8 @@ class PhantomApp(App):
         matched_contact = None
 
         for contact in contacts:
+            if expected_source and contact.verify_key != expected_source:
+                continue
             try:
                 encryptor = self._get_encryptor(contact)
                 verify_key = VerifyKey(contact.verify_key.encode(), encoder=HexEncoder)
@@ -1868,18 +1952,35 @@ class PhantomApp(App):
 
         if matched_contact:
             if self.transport and self.transport.is_connected():
-                delivery_id = hashlib.sha256(payload).digest()
+                delivery_id = relay_delivery_id or hashlib.sha256(payload).digest()
                 signature = self.key_manager.signing_key.sign(delivery_id).signature
-                ack_chunks = self._chunk_message(
-                    MessageType.ACK, delivery_id + signature
-                )
+                ack_payload = delivery_id + signature
+                if expected_source:
+                    await self._send_relay_ack(expected_source, delivery_id)
+                    ack_chunks = []
+                else:
+                    ack_chunks = self._chunk_message(MessageType.ACK, ack_payload)
                 for chunk in ack_chunks:
                     await self.transport.send(chunk.to_bytes())
             # Schedule UI refresh via call_later so Textual's active_app context is set
             self.call_later(self._refresh_ui)
             self.call_later(lambda c=matched_contact: self._refresh_chat(c.id))
+            return True
         else:
             logger.warning("Could not decrypt incoming message from any known contact.")
+            return False
+
+    async def _send_relay_ack(self, destination: str, delivery_id: bytes) -> None:
+        if not self.transport or not self.transport.is_connected():
+            return
+        signature = self.key_manager.signing_key.sign(delivery_id).signature
+        ack = RelayEnvelope.create(
+            "ack", self.key_manager.identity_hex, destination, delivery_id + signature
+        )
+        encoded = ack.encode()
+        self.db_manager.queue_relay(ack.packet_id, encoded, self._connected_peer_public_key())
+        for chunk in self._chunk_message(MessageType.RELAY_MESSAGE, encoded):
+            await self.transport.send(chunk.to_bytes())
 
     # ------------------------------------------------------------------
     # BLE Transport Management
@@ -1934,6 +2035,7 @@ class PhantomApp(App):
 
     async def _on_peer_disconnected(self) -> None:
         logger.warning("Peer disconnected.")
+        self._connected_contact_id = None
         self._pending_deliveries.clear()
         if isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
             status = "Advertising and waiting for a device."
@@ -1954,6 +2056,10 @@ class PhantomApp(App):
                 signing_key=self.key_manager.signing_key,
             )
         return self._encryptors[contact.id]
+
+    def _connected_peer_public_key(self) -> str:
+        peer = self.db_manager.get_contact(self._connected_contact_id) if self._connected_contact_id else None
+        return peer.public_key if peer else ""
 
     def _set_connection_status(self, status: str) -> None:
         self._connection_status_text = status

@@ -39,6 +39,7 @@ class MessageType(IntEnum):
     TEXT_MESSAGE = 0x02
     ACK = 0x03
     DISCONNECT = 0x04
+    RELAY_MESSAGE = 0x05
 
 
 @dataclass

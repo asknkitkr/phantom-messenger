@@ -10,6 +10,7 @@ Phantom Messenger lets nearby devices exchange encrypted text messages over Blue
 ## Features
 
 - **Works offline:** devices communicate directly over Bluetooth LE.
+- **Store-and-forward mesh:** trusted peers can carry encrypted messages between devices across sequential connections.
 - **Private messages:** messages are encrypted and signed using libsodium.
 - **Encrypted storage:** SQLCipher protects locally stored messages and contacts.
 - **Runs on Windows, macOS, and Linux:** Bluetooth support depends on the operating system and adapter.
@@ -49,6 +50,8 @@ Phantom Messenger lets nearby devices exchange encrypted text messages over Blue
 4. Each device derives the same shared secret locally using X25519; the secret is never sent.
 5. Messages are encrypted, signed, split into BLE packets, and sent over GATT.
 6. Contacts and messages are stored in the encrypted SQLCipher database.
+
+Mesh relaying is store-and-forward: a relay device keeps an opaque encrypted packet and forwards it on a later trusted connection. It supports up to eight hops and retains up to 500 queued packets for seven days. Devices connect to one peer at a time; this is not simultaneous Bluetooth mesh routing.
 
 ### BLE Transport Protocol
 

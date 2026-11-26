@@ -36,3 +36,5 @@ Private key files are protected with Argon2id using a unique random salt per pro
 ## Security Limits
 
 No software can be guaranteed unbreakable. Phantom Messenger does not provide forward secrecy: compromise of a device's long-term private keys can expose captured message traffic. Initial peer keys are not independently verified in person, so users should compare the shared key bundle through a trusted channel before trusting a contact. Use a unique passphrase with at least 12 characters and keep the device itself protected. No fingerprint or biometric is required.
+
+Mesh relays store and forward encrypted payloads for up to seven days. Relays cannot decrypt message contents, but routing metadata (source and destination identity keys, packet size, and timing) is visible to them. Relaying is limited to previously trusted BLE peers and has a finite hop count.

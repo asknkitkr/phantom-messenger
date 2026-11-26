@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS drafts (
     content TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS relay_queue (
+    packet_id TEXT PRIMARY KEY,
+    envelope BLOB NOT NULL,
+    via TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS relay_seen (
+    packet_id TEXT PRIMARY KEY,
+    seen_at REAL NOT NULL
+);
 """
 
 
@@ -359,11 +371,22 @@ class DatabaseManager:
             "drafts": [list(row) for row in self._db.execute(
                 "SELECT contact_id, content FROM drafts"
             )],
+            "relay_queue": [
+                [packet_id, bytes(envelope).hex(), via, created_at]
+                for packet_id, envelope, via, created_at in self._db.execute(
+                    "SELECT packet_id, envelope, via, created_at FROM relay_queue"
+                )
+            ],
+            "relay_seen": [list(row) for row in self._db.execute(
+                "SELECT packet_id, seen_at FROM relay_seen"
+            )],
         }
 
     def restore_profile_data(self, data: dict) -> None:
         with self._db:
             self._db.execute("DELETE FROM contacts")
+            self._db.execute("DELETE FROM relay_queue")
+            self._db.execute("DELETE FROM relay_seen")
             self._db.executemany(
                 "INSERT INTO contacts VALUES (?, ?, ?, ?, ?, ?)", data["contacts"]
             )
@@ -372,6 +395,16 @@ class DatabaseManager:
             )
             self._db.executemany(
                 "INSERT INTO drafts VALUES (?, ?)", data.get("drafts", [])
+            )
+            self._db.executemany(
+                "INSERT INTO relay_queue VALUES (?, ?, ?, ?)",
+                [
+                    (packet_id, bytes.fromhex(encoded), via, created_at)
+                    for packet_id, encoded, via, created_at in data.get("relay_queue", [])
+                ],
+            )
+            self._db.executemany(
+                "INSERT INTO relay_seen VALUES (?, ?)", data.get("relay_seen", [])
             )
 
     def rekey(self, passphrase: str) -> None:
@@ -444,6 +477,46 @@ class DatabaseManager:
             "SELECT content FROM drafts WHERE contact_id=?", (contact_id,)
         ).fetchone()
         return row[0] if row else ""
+
+    def remember_relay(self, packet_id: str) -> bool:
+        self._db.execute("DELETE FROM relay_seen WHERE seen_at < ?", (time.time() - 7 * 86400,))
+        self._db.execute(
+            "DELETE FROM relay_seen WHERE packet_id IN ("
+            "SELECT packet_id FROM relay_seen ORDER BY seen_at DESC LIMIT -1 OFFSET 10000)"
+        )
+        cursor = self._db.execute(
+            "INSERT OR IGNORE INTO relay_seen(packet_id, seen_at) VALUES (?, ?)",
+            (packet_id, time.time()),
+        )
+        self._db.commit()
+        return cursor.rowcount == 1
+
+    def forget_relay(self, packet_id: str) -> None:
+        self._db.execute("DELETE FROM relay_seen WHERE packet_id=?", (packet_id,))
+        self._db.commit()
+
+    def queue_relay(self, packet_id: str, envelope: bytes, via: str = "") -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO relay_queue(packet_id, envelope, via, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (packet_id, envelope, via, time.time()),
+        )
+        self._db.commit()
+
+    def get_queued_relays(self) -> list[tuple[str, bytes, str]]:
+        self._db.execute("DELETE FROM relay_queue WHERE created_at < ?", (time.time() - 7 * 86400,))
+        self._db.execute(
+            "DELETE FROM relay_queue WHERE packet_id IN ("
+            "SELECT packet_id FROM relay_queue ORDER BY created_at DESC LIMIT -1 OFFSET 500)"
+        )
+        self._db.commit()
+        return self._db.execute(
+            "SELECT packet_id, envelope, via FROM relay_queue ORDER BY created_at"
+        ).fetchall()
+
+    def delete_queued_relay(self, packet_id: str) -> None:
+        self._db.execute("DELETE FROM relay_queue WHERE packet_id=?", (packet_id,))
+        self._db.commit()
 
     # ------------------------------------------------------------------
     # Helpers
