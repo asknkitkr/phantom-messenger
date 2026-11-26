@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 from messenger.config import DATA_DIR
 from messenger.crypto.keys import KeyManager
@@ -53,6 +54,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    data_dir = Path(args.data_dir).expanduser() if args.data_dir else DATA_DIR
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     # Configure logging
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -60,16 +63,16 @@ def main() -> None:
         level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(DATA_DIR / "phantom.log"),
+            logging.FileHandler(data_dir / "phantom.log"),
         ],
     )
     logger = logging.getLogger("messenger")
     logger.info("Starting Phantom Messenger v1.0.0")
-    logger.info("Data directory: %s", DATA_DIR)
+    logger.info("Data directory: %s", data_dir)
 
     # Initialize components
-    key_manager = KeyManager()
-    db_manager = DatabaseManager()
+    key_manager = KeyManager(keys_dir=data_dir / "keys")
+    db_manager = DatabaseManager(db_path=data_dir / "phantom.db")
 
     # Select transport
     transport = None

@@ -41,8 +41,8 @@ except ImportError:
 
     HAS_SQLCIPHER = False
     logger.warning(
-        "sqlcipher3 not found — falling back to plain sqlite3. "
-        "Install sqlcipher3 for encrypted storage: pip install sqlcipher3"
+        "sqlcipher3 not found; encrypted storage is unavailable. "
+        "Install sqlcipher3 to use the database."
     )
 
 
@@ -149,6 +149,8 @@ class DatabaseManager:
                 return False
 
         self._conn = sqlite3.connect(str(self._db_path))
+        if os.name != "nt":
+            os.chmod(self._db_path, 0o600)
 
         # SQLCipher requires PRAGMA key to be the FIRST statement
         safe_pass = passphrase.replace("'", "''")
@@ -170,6 +172,8 @@ class DatabaseManager:
 
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        if os.name != "nt":
+            os.chmod(self._db_path, 0o600)
         return True
 
     def close(self) -> None:
@@ -177,6 +181,17 @@ class DatabaseManager:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def reset(self) -> None:
+        """Close and remove the saved profile database."""
+        self.close()
+        for path in (
+            self._db_path,
+            self._db_path.with_name(self._db_path.name + "-wal"),
+            self._db_path.with_name(self._db_path.name + "-shm"),
+            self._db_path.with_name(self._db_path.name + "-journal"),
+        ):
+            path.unlink(missing_ok=True)
 
     @property
     def _db(self) -> sqlite3.Connection:
@@ -311,6 +326,16 @@ class DatabaseManager:
         )
         self._db.commit()
 
+    def get_undelivered_messages(self, contact_id: str) -> list[Message]:
+        """Return outgoing messages that still need delivery confirmation."""
+        rows = self._db.execute(
+            "SELECT id, contact_id, content, timestamp, direction, status, is_read "
+            "FROM messages WHERE contact_id=? AND direction='sent' "
+            "AND status IN ('pending', 'failed') ORDER BY timestamp",
+            (contact_id,),
+        ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     def update_message_status(self, message_id: str, status: MessageStatus) -> None:
         """Update the delivery status of a message."""
         self._db.execute(
@@ -324,18 +349,37 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     def get_conversations(self) -> list[Conversation]:
-        """Get all conversations with their latest messages."""
-        contacts = self.get_all_contacts()
+        """Fetch sidebar summaries in one query instead of loading 50 messages per contact."""
+        rows = self._db.execute(
+            """
+            SELECT c.id, c.name, c.public_key, c.verify_key, c.last_seen, c.created_at,
+                   m.id, m.contact_id, m.content, m.timestamp, m.direction, m.status, m.is_read,
+                   COALESCE(u.unread_count, 0)
+            FROM contacts c
+            LEFT JOIN messages m ON m.id = (
+                SELECT id FROM messages
+                WHERE contact_id = c.id ORDER BY timestamp DESC LIMIT 1
+            )
+            LEFT JOIN (
+                SELECT contact_id, COUNT(*) AS unread_count
+                FROM messages
+                WHERE direction = 'received' AND is_read = 0
+                GROUP BY contact_id
+            ) u ON u.contact_id = c.id
+            ORDER BY COALESCE(m.timestamp, 0) DESC
+            """
+        ).fetchall()
         conversations = []
-        for contact in contacts:
-            messages = self.get_messages(contact.id, limit=50)
-            conversations.append(Conversation(contact=contact, messages=messages))
-
-        # Sort by most recent activity
-        conversations.sort(
-            key=lambda c: c.last_message.timestamp if c.last_message else 0,
-            reverse=True,
-        )
+        for row in rows:
+            contact = self._row_to_contact(row[:6])
+            latest = self._row_to_message(row[6:13]) if row[6] else None
+            conversations.append(
+                Conversation(
+                    contact=contact,
+                    messages=[latest] if latest else [],
+                    unread_total=row[13],
+                )
+            )
         return conversations
 
     # ------------------------------------------------------------------

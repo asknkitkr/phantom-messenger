@@ -30,3 +30,9 @@ Phantom Messenger uses the following cryptographic primitives:
 | Database Encryption | AES-256-CBC | SQLCipher |
 
 All cryptographic operations use the well-audited **libsodium** library via PyNaCl bindings. No custom cryptography is implemented.
+
+Private key files are protected with Argon2id using a unique random salt per profile, and POSIX file permissions are restricted for the key directory and key files. Existing key files created by earlier versions remain readable.
+
+## Security Limits
+
+No software can be guaranteed unbreakable. Phantom Messenger does not provide forward secrecy: compromise of a device's long-term private keys can expose captured message traffic. Initial peer keys are not independently verified in person, so users should compare the shared key bundle through a trusted channel before trusting a contact. Use a unique passphrase with at least 12 characters and keep the device itself protected. No fingerprint or biometric is required.

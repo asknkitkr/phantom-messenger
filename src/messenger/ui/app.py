@@ -22,7 +22,7 @@ from typing import Optional
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.containers import Container, Horizontal, Vertical, ScrollableContainer, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message as TMessage
 from textual.reactive import reactive, var
@@ -37,9 +37,15 @@ from textual.widgets import (
     ListItem,
     ListView,
     Static,
+    TextArea,
 )
 
-from messenger.config import DATA_DIR, MAX_CHUNK_PAYLOAD, MAX_MESSAGE_LENGTH
+from messenger.config import (
+    DATA_DIR,
+    MAX_CHUNK_PAYLOAD,
+    MAX_MESSAGE_LENGTH,
+    MIN_PASSPHRASE_LENGTH,
+)
 from messenger.crypto.keys import KeyManager
 from messenger.crypto.encryption import MessageEncryptor
 from messenger.storage.database import DatabaseManager
@@ -75,13 +81,19 @@ Screen {
 }
 
 /* ---- Login Screen ---- */
+#login-scroll {
+    width: 100%;
+    height: 100%;
+    align: center top;
+}
+
 #login-container {
-    align: center middle;
-    width: 60;
+    width: 1fr;
+    max-width: 60;
     height: auto;
-    max-height: 24;
+    margin: 1 1;
     border: heavy $primary;
-    padding: 2 4;
+    padding: 1 2;
     background: $surface;
 }
 
@@ -120,7 +132,7 @@ Screen {
 /* ---- Main Screen ---- */
 #main-layout {
     layout: horizontal;
-    height: 100%;
+    height: 1fr;
 }
 
 #sidebar {
@@ -212,7 +224,6 @@ Screen {
 
 #message-input-bar {
     height: 3;
-    dock: bottom;
     layout: horizontal;
     padding: 0 1;
     background: $surface;
@@ -293,7 +304,8 @@ class LoginScreen(Screen):
     """Passphrase entry to unlock the app."""
 
     def compose(self) -> ComposeResult:
-        yield Container(
+        yield VerticalScroll(
+            Container(
             Static("PHANTOM MESSENGER", id="login-title"),
             Static("Private messages without an internet connection", id="login-subtitle"),
             Input(
@@ -301,42 +313,112 @@ class LoginScreen(Screen):
                 password=True,
                 id="passphrase-input",
             ),
+            Input(
+                placeholder="Confirm your passphrase",
+                password=True,
+                id="confirm-passphrase-input",
+            ),
+            Static("", id="login-help"),
             Button("Unlock", variant="primary", classes="login-btn", id="unlock-btn"),
             Button(
-                "Create New Identity",
+                "Create Identity",
                 variant="default",
                 classes="login-btn",
                 id="create-btn",
             ),
+            Button("Create New Profile…", variant="error", id="new-profile-btn"),
+            Static(
+                "This permanently deletes the identity, contacts, and messages in this profile. "
+                "You won't be able to recover them afterward. Type DELETE to continue.",
+                id="reset-profile-help",
+            ),
+            Input(placeholder="Type DELETE to confirm", id="reset-profile-confirm-input"),
+            Button("Delete profile and start over", variant="error", id="confirm-reset-btn"),
             Static("", id="login-error"),
             id="login-container",
+            ),
+            id="login-scroll",
         )
+
+    def on_mount(self) -> None:
+        has_identity = self.app.key_manager.has_keys()
+        unlock = self.query_one("#unlock-btn", Button)
+        create = self.query_one("#create-btn", Button)
+        confirm = self.query_one("#confirm-passphrase-input", Input)
+        reset_help = self.query_one("#reset-profile-help", Static)
+        reset_input = self.query_one("#reset-profile-confirm-input", Input)
+        reset_confirm = self.query_one("#confirm-reset-btn", Button)
+        new_profile = self.query_one("#new-profile-btn", Button)
+        confirm.styles.display = "none"
+        reset_help.styles.display = "none"
+        reset_input.styles.display = "none"
+        reset_confirm.styles.display = "none"
+        unlock.styles.display = "block" if has_identity else "none"
+        create.styles.display = "none" if has_identity else "block"
+        new_profile.styles.display = "block" if has_identity else "none"
+        self.query_one("#login-help", Static).update(
+            "Enter your passphrase to unlock your identity."
+            if has_identity
+            else "Choose a passphrase to create your identity."
+        )
+        self.query_one("#passphrase-input", Input).focus()
 
     @on(Button.Pressed, "#unlock-btn")
     def handle_unlock(self) -> None:
-        passphrase = self.query_one("#passphrase-input", Input).value.strip()
-        if not passphrase:
+        passphrase = self.query_one("#passphrase-input", Input).value
+        if not passphrase.strip():
             self._show_error("Passphrase cannot be empty.")
+            return
+        if not self.app.key_manager.has_keys():
+            self._show_error("Create an identity first, then unlock it here.")
             return
         self.app.post_message(self.Unlock(passphrase))
 
     @on(Button.Pressed, "#create-btn")
     def handle_create(self) -> None:
-        passphrase = self.query_one("#passphrase-input", Input).value.strip()
-        if not passphrase:
+        passphrase = self.query_one("#passphrase-input", Input).value
+        if not passphrase.strip():
             self._show_error("Enter a passphrase to protect your identity.")
             return
-        if len(passphrase) < 8:
-            self._show_error("Passphrase must be at least 8 characters.")
+        if len(passphrase) < MIN_PASSPHRASE_LENGTH:
+            self._show_error(f"Passphrase must be at least {MIN_PASSPHRASE_LENGTH} characters.")
+            return
+        confirm = self.query_one("#confirm-passphrase-input", Input)
+        if confirm.styles.display == "none":
+            confirm.styles.display = "block"
+            self.query_one("#create-btn", Button).label = "Create Identity"
+            self.query_one("#login-help", Static).update(
+                "Enter your passphrase again to make sure it is correct."
+            )
+            confirm.focus()
+            return
+        if passphrase != confirm.value:
+            self._show_error("The passphrases don't match. Please try again.")
             return
         self.app.post_message(self.CreateIdentity(passphrase))
 
+    @on(Button.Pressed, "#new-profile-btn")
+    def handle_reset_profile(self) -> None:
+        self.query_one("#reset-profile-help", Static).styles.display = "block"
+        self.query_one("#reset-profile-confirm-input", Input).styles.display = "block"
+        self.query_one("#confirm-reset-btn", Button).styles.display = "block"
+
+    @on(Button.Pressed, "#confirm-reset-btn")
+    def handle_confirm_reset(self) -> None:
+        confirmation = self.query_one("#reset-profile-confirm-input", Input).value
+        if confirmation != "DELETE":
+            self._show_error('Type DELETE to confirm removing this profile.')
+            return
+        self.app.post_message(self.ResetProfile())
+
     @on(Input.Submitted, "#passphrase-input")
     def handle_submit(self) -> None:
-        passphrase = self.query_one("#passphrase-input", Input).value.strip()
-        if not passphrase:
+        passphrase = self.query_one("#passphrase-input", Input).value
+        if not passphrase.strip():
             return
-        # Try unlock first; if no keys exist, the app will handle it
+        if not self.app.key_manager.has_keys():
+            self._show_error("Create an identity first, then unlock it here.")
+            return
         self.app.post_message(self.Unlock(passphrase))
 
     def _show_error(self, msg: str) -> None:
@@ -354,6 +436,48 @@ class LoginScreen(Screen):
         def __init__(self, passphrase: str) -> None:
             super().__init__()
             self.passphrase = passphrase
+
+    class ResetProfile(TMessage):
+        """Delete the current identity and local profile data."""
+
+
+class CreateProfileScreen(Screen):
+    """Set a passphrase for a replacement profile after reset."""
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Container(
+            Static("CREATE NEW PROFILE", id="login-title"),
+            Static("Choose a passphrase to protect your new identity.", id="login-subtitle"),
+            Input(placeholder="New passphrase", password=True, id="new-passphrase-input"),
+            Input(placeholder="Confirm passphrase", password=True, id="confirm-new-passphrase-input"),
+            Static("", id="login-error"),
+            Button("Create Profile", variant="primary", id="create-profile-btn"),
+            id="login-container",
+            ),
+            id="login-scroll",
+        )
+
+    @on(Button.Pressed, "#create-profile-btn")
+    def handle_create_profile(self) -> None:
+        passphrase = self.query_one("#new-passphrase-input", Input).value
+        confirmation = self.query_one("#confirm-new-passphrase-input", Input).value
+        if not passphrase.strip():
+            self._show_error("Enter a passphrase to protect your new identity.")
+        elif len(passphrase) < MIN_PASSPHRASE_LENGTH:
+            self._show_error(f"Passphrase must be at least {MIN_PASSPHRASE_LENGTH} characters.")
+        elif passphrase != confirmation:
+            self._show_error("The passphrases don't match. Please try again.")
+        else:
+            self.app.post_message(LoginScreen.CreateIdentity(passphrase))
+
+    def on_mount(self) -> None:
+        self.query_one("#new-passphrase-input", Input).focus()
+
+    def _show_error(self, message: str) -> None:
+        error = self.query_one("#login-error", Static)
+        error.update(message)
+        error.styles.display = "block"
 
 
 # ======================================================================
@@ -375,6 +499,11 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        yield Static(
+            "Not connected. Messages will wait on this device.",
+            id="connection-status",
+            markup=False,
+        )
         with Horizontal(id="main-layout"):
             with Vertical(id="sidebar"):
                 yield Static("  CONTACTS", id="sidebar-header")
@@ -384,12 +513,13 @@ class MainScreen(Screen):
                 yield Button("My Keys", variant="default", id="show-keys-btn")
             with Vertical(id="right-panel"):
                 with Vertical(id="chat-panel"):
-                    yield Static("  Select a contact", id="chat-header")
+                    yield Static("  Select a contact", id="chat-header", markup=False)
                     yield ScrollableContainer(
                         Static(
                             "Select a contact to start chatting\n\n"
                             "Press Ctrl+N to scan for nearby devices",
                             classes="empty-chat-placeholder",
+                            markup=False,
                         ),
                         id="chat-messages",
                     )
@@ -414,15 +544,15 @@ class MainScreen(Screen):
     @on(Input.Submitted, "#message-input")
     def handle_send(self) -> None:
         inp = self.query_one("#message-input", Input)
-        text = inp.value.strip()
+        text = inp.value
 
         logger.debug(
-            "handle_send: text=%r, selected_contact=%r",
-            text[:20] if text else None,
+            "handle_send: has_text=%s, selected_contact=%r",
+            bool(text),
             self.selected_contact,
         )
 
-        if not text:
+        if not text.strip():
             self.notify("Please type a message first.", severity="warning")
             return
         if self.selected_contact is None:
@@ -467,8 +597,7 @@ class MainScreen(Screen):
         pass
 
     @on(ListView.Selected, "#contact-list")
-    @on(ListView.Highlighted, "#contact-list")
-    def handle_contact_selected(self, event: ListView.Selected | ListView.Highlighted) -> None:
+    def handle_contact_selected(self, event: ListView.Selected) -> None:
         if event.item is None:
             return
         # Look up the contact_id by the item's index in the ListView
@@ -503,8 +632,8 @@ class MainScreen(Screen):
 
             self._contact_index_map[idx] = c.id
             item = ListItem(
-                Label(name_text, classes="contact-name"),
-                Label(preview, classes="contact-preview"),
+                Label(name_text, classes="contact-name", markup=False),
+                Label(preview, classes="contact-preview", markup=False),
                 classes="contact-item",
             )
             lv.append(item)
@@ -535,18 +664,19 @@ class MainScreen(Screen):
                 "msg-sent" if msg.direction == MessageDirection.SENT else "msg-received"
             )
             prefix = "You" if msg.direction == MessageDirection.SENT else contact.name or contact.short_id
-            status_icon = ""
+            delivery_status = ""
             if msg.direction == MessageDirection.SENT:
                 if msg.status == MessageStatus.DELIVERED:
-                    status_icon = " [ok]"
+                    delivery_status = " (delivered)"
                 elif msg.status == MessageStatus.FAILED:
-                    status_icon = " [!]"
+                    delivery_status = " (not sent; will retry when connected)"
                 else:
-                    status_icon = " [...]"
+                    delivery_status = " (waiting to send)"
 
             line = Static(
-                f"[{msg.time_display}] {prefix}: {msg.content}{status_icon}",
+                f"[{msg.time_display}] {prefix}: {msg.content}{delivery_status}",
                 classes=f"msg-row {direction_class}",
+                markup=False,
             )
             container.mount(line)
 
@@ -615,6 +745,7 @@ class ScanScreen(Screen):
                     item = ListItem(
                         Label(
                             f"{dev['name']} ({dev['address']}) RSSI: {dev['rssi']}",
+                            markup=False,
                         ),
                         id=f"device-{dev['address']}",
                         classes="scan-device",
@@ -626,7 +757,11 @@ class ScanScreen(Screen):
                     "Make sure the other device is running and advertising."
                 )
         except Exception as exc:
-            status.update(f"Scan failed: {exc}\nTry adding a contact manually.")
+            logger.warning("BLE scan failed: %s", exc)
+            status.update(
+                "Couldn't scan for devices. Check that Bluetooth is on and the app "
+                "has permission, then try again or add a contact manually."
+            )
         finally:
             try:
                 refresh_btn = self.query_one("#scan-refresh-btn", Button)
@@ -666,6 +801,45 @@ class ScanScreen(Screen):
 # ======================================================================
 
 
+class KeyBundleScreen(Screen):
+    """Show the public keys together as a copyable JSON bundle."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def __init__(self, bundle: str) -> None:
+        super().__init__()
+        self.bundle = bundle
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("Share this key bundle with your contact:", id="scan-title"),
+            TextArea(self.bundle, read_only=True, id="key-bundle-view"),
+            Static("If copying doesn't work in your terminal, select the text and copy it manually."),
+            Horizontal(
+                Button("Copy", variant="primary", id="copy-key-bundle-btn"),
+                Button("Close", variant="default", id="close-key-bundle-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#copy-key-bundle-btn")
+    def handle_copy(self) -> None:
+        try:
+            self.app.copy_to_clipboard(self.bundle)
+        except Exception:
+            self.app.notify(
+                "Clipboard access isn't available. Select and copy the bundle instead.",
+                severity="warning",
+            )
+        else:
+            self.app.notify("Key bundle copied.", severity="information")
+
+    @on(Button.Pressed, "#close-key-bundle-btn")
+    def handle_close(self) -> None:
+        self.dismiss()
+
+
 class ManualAddScreen(Screen):
     """Manually add a contact by pasting their public key bundle."""
 
@@ -677,12 +851,11 @@ class ManualAddScreen(Screen):
         yield Container(
             Static("ADD CONTACT MANUALLY", id="scan-title"),
             Static(
-                "Paste the other user's public key (hex):",
+                "Paste the JSON key bundle from your contact's My Keys screen:",
                 id="scan-status",
             ),
             Input(placeholder="Contact name", id="manual-name"),
-            Input(placeholder="X25519 public key (hex, 64 chars)", id="manual-pubkey"),
-            Input(placeholder="Ed25519 verify key (hex, 64 chars)", id="manual-verifykey"),
+            Input(placeholder='{"public_key":"...","verify_key":"..."}', id="manual-bundle"),
             Horizontal(
                 Button("Add", variant="primary", id="manual-add-btn"),
                 Button("Cancel", variant="error", id="manual-cancel-btn"),
@@ -695,20 +868,24 @@ class ManualAddScreen(Screen):
     @on(Button.Pressed, "#manual-add-btn")
     def handle_add(self) -> None:
         name = self.query_one("#manual-name", Input).value.strip()
-        pubkey = self.query_one("#manual-pubkey", Input).value.strip()
-        verifykey = self.query_one("#manual-verifykey", Input).value.strip()
-
-        if not name:
-            name = pubkey[:8] if pubkey else "Unknown"
-
-        if len(pubkey) != 64 or len(verifykey) != 64:
+        raw_bundle = self.query_one("#manual-bundle", Input).value.strip()
+        try:
+            bundle = json.loads(raw_bundle)
+        except json.JSONDecodeError:
+            bundle = None
+        if not KeyManager.verify_peer_bundle(bundle):
             err = self.query_one("#login-error", Static)
-            err.update("Keys must be exactly 64 hex characters each.")
+            err.update("That key bundle isn't valid. Ask your contact to copy it again.")
             err.styles.display = "block"
             return
 
+        public_key = bundle["public_key"].lower()
+        verify_key = bundle["verify_key"].lower()
+        if not name:
+            name = public_key[:8]
+
         self.app.post_message(
-            self.ManualContactAdd(name=name, public_key=pubkey, verify_key=verifykey)
+            self.ManualContactAdd(name=name, public_key=public_key, verify_key=verify_key)
         )
         self.dismiss()
 
@@ -755,6 +932,7 @@ class PhantomApp(App):
         self._assembler = ChunkAssembler()
         self._encryptors: dict[str, MessageEncryptor] = {}
         self._pending_deliveries: dict[bytes, ChatMessage] = {}
+        self._sending_message_ids: set[str] = set()
 
 
     def on_unmount(self) -> None:
@@ -768,13 +946,26 @@ class PhantomApp(App):
     # Login Handlers
     # ------------------------------------------------------------------
 
+    @on(LoginScreen.ResetProfile)
+    def handle_reset_profile(self) -> None:
+        try:
+            self.db_manager.reset()
+            self.key_manager.reset()
+        except OSError as exc:
+            logger.error("Failed to reset profile: %s", exc)
+            self.notify("Could not delete the profile. Check file permissions and try again.", severity="error")
+            return
+        self.notify("Profile deleted. Create a new identity to continue.", severity="information")
+        if isinstance(self.screen, LoginScreen):
+            self.switch_screen(CreateProfileScreen())
+
     @on(LoginScreen.Unlock)
     def handle_unlock(self, message: LoginScreen.Unlock) -> None:
         passphrase = message.passphrase
 
         if not self.key_manager.has_keys():
             self.notify(
-                "No identity found. Click 'Create New Identity' first.",
+                "No identity found. Create one to get started.",
                 severity="warning",
             )
             return
@@ -843,6 +1034,10 @@ class PhantomApp(App):
         """MainScreen has mounted — now safe to populate the contact list."""
         logger.info("MainScreen mounted, refreshing contacts...")
         self._refresh_ui()
+        if self.transport and self.transport.is_connected():
+            self._set_connection_status("Connected to a nearby device.")
+        elif isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
+            self._set_connection_status("Advertising and waiting for a device.")
 
     @on(MainScreen.ContactSelected)
     def handle_contact_selected(self, message: MainScreen.ContactSelected) -> None:
@@ -878,11 +1073,22 @@ class PhantomApp(App):
         # Encrypt and send via BLE (if connected)
         if self.transport and self.transport.is_connected():
             self._send_encrypted(contact, chat_msg)
-        # Otherwise it remains pending locally and is not reported as delivered.
+        else:
+            self.notify(
+                "Saved on this device. It will send when you reconnect to this contact.",
+                severity="information",
+            )
 
     @work(thread=False)
     async def _send_encrypted(self, contact: Contact, chat_msg: ChatMessage) -> None:
-        """Encrypt and send a message via BLE transport."""
+        """Queue delivery work without blocking the UI."""
+        await self._transmit_message(contact, chat_msg)
+
+    async def _transmit_message(self, contact: Contact, chat_msg: ChatMessage) -> None:
+        """Encrypt and send one saved message, leaving it retryable on failure."""
+        if chat_msg.id in self._sending_message_ids:
+            return
+        self._sending_message_ids.add(chat_msg.id)
         delivery_id: bytes | None = None
         try:
             encryptor = self._get_encryptor(contact)
@@ -896,17 +1102,18 @@ class PhantomApp(App):
                 for chunk in chunks:
                     await self.transport.send(chunk.to_bytes())
             else:
-                logger.info("Not connected; message remains pending.")
+                chat_msg.status = MessageStatus.PENDING
 
         except Exception as exc:
             if delivery_id is not None:
                 self._pending_deliveries.pop(delivery_id, None)
-            logger.error("Failed to send message: %s", exc)
+            logger.warning("Message delivery attempt failed: %s", exc)
             if chat_msg.status != MessageStatus.DELIVERED:
                 chat_msg.status = MessageStatus.FAILED
-
-        self.db_manager.update_message_status(chat_msg.id, chat_msg.status)
-        self._refresh_chat(contact.id)
+        finally:
+            self._sending_message_ids.discard(chat_msg.id)
+            self.db_manager.update_message_status(chat_msg.id, chat_msg.status)
+            self._refresh_chat(contact.id)
 
     # ------------------------------------------------------------------
     # Manual Contact Add
@@ -914,6 +1121,17 @@ class PhantomApp(App):
 
     @on(ManualAddScreen.ManualContactAdd)
     def handle_manual_add(self, message: ManualAddScreen.ManualContactAdd) -> None:
+        existing = self.db_manager.get_contact_by_public_key(message.public_key)
+        if existing:
+            if existing.verify_key != message.verify_key:
+                self.notify(
+                    "That encryption key is already saved with a different identity key.",
+                    severity="error",
+                )
+            else:
+                self.notify("This contact is already in your list.", severity="warning")
+            return
+
         contact = Contact(
             name=message.name,
             public_key=message.public_key,
@@ -937,7 +1155,11 @@ class PhantomApp(App):
         """Connect to another device and exchange keys."""
         logger.info(f"Connecting to {address}...")
         central = BLECentral()
-        central.set_callbacks(on_data=self._on_data_received)
+        central.set_callbacks(
+            on_data=self._on_data_received,
+            on_connect=self._on_peer_connected,
+            on_disconnect=self._on_peer_disconnected,
+        )
 
         if await central.connect_to(address):
             self.transport = central
@@ -954,6 +1176,13 @@ class PhantomApp(App):
                 logger.error("Failed to send key bundle: %s", exc)
         else:
             logger.error(f"Failed to connect to {address}.")
+            self._set_connection_status(
+                "Couldn't connect. Check that the other device is nearby and advertising."
+            )
+            self.notify(
+                "Couldn't connect to that device. Check Bluetooth and try again.",
+                severity="error",
+            )
 
     # ------------------------------------------------------------------
     # Incoming Data
@@ -1008,16 +1237,19 @@ class PhantomApp(App):
                 logger.warning("Invalid key exchange bundle received.")
                 return
 
-            existing = self.db_manager.get_contact_by_public_key(bundle["public_key"])
+            public_key = bundle["public_key"].lower()
+            verify_key = bundle["verify_key"].lower()
+            existing = self.db_manager.get_contact_by_public_key(public_key)
             if existing:
+                contact = existing
                 existing.last_seen = time.time()
                 self.db_manager.save_contact(existing)
                 logger.info(f"Reconnected with {existing.name}")
             else:
                 contact = Contact(
-                    name=bundle["public_key"][:8],
-                    public_key=bundle["public_key"],
-                    verify_key=bundle["verify_key"],
+                    name=public_key[:8],
+                    public_key=public_key,
+                    verify_key=verify_key,
                     last_seen=time.time(),
                 )
                 self.db_manager.save_contact(contact)
@@ -1034,8 +1266,23 @@ class PhantomApp(App):
                 for chunk in chunks:
                     await self.transport.send(chunk.to_bytes())
 
+            await self._flush_pending_messages(contact)
+
         except Exception as exc:
             logger.error("Key exchange failed: %s", exc, exc_info=True)
+
+    async def _flush_pending_messages(self, contact: Contact) -> None:
+        if not self.transport or not self.transport.is_connected():
+            return
+        awaiting_ack = {message.id for message in self._pending_deliveries.values()}
+        for message in self.db_manager.get_undelivered_messages(contact.id):
+            if not self.transport.is_connected():
+                break
+            if message.id in awaiting_ack or message.id in self._sending_message_ids:
+                continue
+            message.status = MessageStatus.PENDING
+            self.db_manager.update_message_status(message.id, message.status)
+            await self._transmit_message(contact, message)
 
     async def _handle_text_message(self, payload: bytes) -> None:
         """Decrypt and store an incoming text message."""
@@ -1063,7 +1310,7 @@ class PhantomApp(App):
                 contact.last_seen = time.time()
                 self.db_manager.save_contact(contact)
 
-                logger.info(f"Message received from {contact.name}: {plaintext[:30]}")
+                logger.info("Received a message from %s", contact.name or contact.short_id)
                 matched_contact = contact
                 break
 
@@ -1119,6 +1366,8 @@ class PhantomApp(App):
             )
             try:
                 await self.transport.start()
+                if isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
+                    self._set_connection_status("Advertising and waiting for a device.")
             except Exception as exc:
                 logger.error("Failed to start BLE transport: %s", exc)
                 logger.error(f"Advertising failed: {exc}")
@@ -1132,9 +1381,16 @@ class PhantomApp(App):
 
     async def _on_peer_connected(self) -> None:
         logger.info("Peer connected via BLE!")
+        self._set_connection_status("Connected to a nearby device.")
 
     async def _on_peer_disconnected(self) -> None:
         logger.warning("Peer disconnected.")
+        self._pending_deliveries.clear()
+        if isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
+            status = "Advertising and waiting for a device."
+        else:
+            status = "Disconnected. Pending messages will send when reconnected."
+        self._set_connection_status(status)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1150,6 +1406,15 @@ class PhantomApp(App):
             )
         return self._encryptors[contact.id]
 
+    def _set_connection_status(self, status: str) -> None:
+        for screen in self.screen_stack:
+            if isinstance(screen, MainScreen):
+                try:
+                    screen.query_one("#connection-status", Static).update(status)
+                except NoMatches:
+                    pass
+                break
+
     def _chunk_message(self, msg_type: MessageType, payload: bytes) -> list[Chunk]:
         max_payload = (
             self.transport.max_chunk_payload
@@ -1160,16 +1425,22 @@ class PhantomApp(App):
 
     def _refresh_ui(self) -> None:
         """Refresh the sidebar contacts list."""
-        current = self.screen
-        if not isinstance(current, MainScreen):
+        current = next(
+            (screen for screen in reversed(self.screen_stack) if isinstance(screen, MainScreen)),
+            None,
+        )
+        if current is None:
             return
         conversations = self.db_manager.get_conversations()
         current.refresh_contacts(conversations)
 
     def _refresh_chat(self, contact_id: str) -> None:
         """Refresh the chat panel for a specific contact."""
-        current = self.screen
-        if not isinstance(current, MainScreen):
+        current = next(
+            (screen for screen in reversed(self.screen_stack) if isinstance(screen, MainScreen)),
+            None,
+        )
+        if current is None:
             return
         contact = self.db_manager.get_contact(contact_id)
         if contact:
@@ -1184,13 +1455,8 @@ class PhantomApp(App):
 
     def action_show_identity(self) -> None:
         """Show the user's public key identity."""
-        self.notify(
-            f"Your Identity (share with contacts):\n\n"
-            f"Public Key:  {self.key_manager.public_key_hex}\n"
-            f"Verify Key:  {self.key_manager.identity_hex}",
-            severity="information",
-            timeout=15,
-        )
+        bundle = json.dumps(self.key_manager.get_public_bundle(), separators=(",", ":"))
+        self.push_screen(KeyBundleScreen(bundle))
 
     def action_quit(self) -> None:
         """Graceful shutdown."""

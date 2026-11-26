@@ -30,6 +30,7 @@ from messenger.config import HEADER_SIZE, MAX_CHUNK_PAYLOAD, MAX_MESSAGE_LENGTH
 
 _MIN_CHUNK_PAYLOAD = 23 - 3 - HEADER_SIZE
 _MAX_CHUNKS = (MAX_MESSAGE_LENGTH * 4 + 2048 + _MIN_CHUNK_PAYLOAD - 1) // _MIN_CHUNK_PAYLOAD
+_MAX_ASSEMBLED_BYTES = MAX_MESSAGE_LENGTH * 4 + 2048
 
 
 class MessageType(IntEnum):
@@ -151,6 +152,7 @@ class ChunkAssembler:
 
     _buffers: dict[tuple[MessageType, int], dict[int, bytes]] = field(default_factory=dict)
     _totals: dict[tuple[MessageType, int], int] = field(default_factory=dict)
+    _sizes: dict[tuple[MessageType, int], int] = field(default_factory=dict)
 
     def feed(self, chunk: Chunk) -> tuple[MessageType, bytes] | None:
         """Feed a received chunk into the assembler.
@@ -175,14 +177,24 @@ class ChunkAssembler:
                 oldest = next(iter(self._buffers))
                 del self._buffers[oldest]
                 del self._totals[oldest]
+                del self._sizes[oldest]
             self._buffers[key] = {}
             self._totals[key] = chunk.total
+            self._sizes[key] = 0
         elif self._totals[key] != chunk.total:
             del self._buffers[key]
             del self._totals[key]
             raise ValueError("Inconsistent chunk total")
 
+        previous = self._buffers[key].get(chunk.sequence, b"")
+        new_size = self._sizes[key] + len(chunk.payload) - len(previous)
+        if new_size > _MAX_ASSEMBLED_BYTES:
+            del self._buffers[key]
+            del self._totals[key]
+            del self._sizes[key]
+            raise ValueError("Assembled message exceeds the maximum size")
         self._buffers[key][chunk.sequence] = chunk.payload
+        self._sizes[key] = new_size
 
         # Check if we have all chunks
         if len(self._buffers[key]) == self._totals[key]:
@@ -193,6 +205,7 @@ class ChunkAssembler:
             # Clean up
             del self._buffers[key]
             del self._totals[key]
+            del self._sizes[key]
             return (chunk.msg_type, full_payload)
 
         return None
@@ -201,3 +214,4 @@ class ChunkAssembler:
         """Clear all buffers."""
         self._buffers.clear()
         self._totals.clear()
+        self._sizes.clear()

@@ -14,6 +14,8 @@ Key Storage:
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 from nacl.encoding import HexEncoder, RawEncoder
@@ -40,7 +42,8 @@ class KeyManager:
 
     def __init__(self, keys_dir: Path = KEYS_DIR) -> None:
         self._keys_dir = keys_dir
-        self._keys_dir.mkdir(parents=True, exist_ok=True)
+        self._keys_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._restrict_permissions(self._keys_dir, 0o700)
 
         self._signing_key: SigningKey | None = None
         self._private_key: PrivateKey | None = None
@@ -96,6 +99,14 @@ class KeyManager:
         """Check if key files exist on disk."""
         return (self._keys_dir / "identity.key").exists()
 
+    def reset(self) -> None:
+        """Delete the saved identity and clear any loaded keys."""
+        self._signing_key = None
+        self._private_key = None
+        if self._keys_dir.exists():
+            shutil.rmtree(self._keys_dir)
+        self._keys_dir.mkdir(parents=True, exist_ok=True)
+
     # ------------------------------------------------------------------
     # Persistence (encrypted with user passphrase)
     # ------------------------------------------------------------------
@@ -108,7 +119,8 @@ class KeyManager:
             raise FileExistsError("An identity already exists; refusing to overwrite it.")
 
         # Derive an encryption key from the passphrase using Argon2id
-        enc_key = self._derive_key(passphrase)
+        salt = random(argon2id.SALTBYTES)
+        enc_key = self._derive_key(passphrase, salt)
         box = SecretBox(enc_key)
 
         # Bundle both private keys into a JSON blob, then encrypt
@@ -119,11 +131,15 @@ class KeyManager:
             "public_key": self.public_key.encode(encoder=HexEncoder).decode(),
         }).encode("utf-8")
 
-        encrypted = box.encrypt(key_bundle)
+        encrypted = b"PMK2" + salt + box.encrypt(key_bundle)
 
         # Write encrypted blob
         key_path = self._keys_dir / "identity.key"
-        key_path.write_bytes(encrypted)
+        temporary_path = key_path.with_suffix(".tmp")
+        temporary_path.write_bytes(encrypted)
+        self._restrict_permissions(temporary_path, 0o600)
+        os.replace(temporary_path, key_path)
+        self._restrict_permissions(key_path, 0o600)
 
         # Also save the *public* keys unencrypted (needed for BLE advertising)
         pub_path = self._keys_dir / "public.json"
@@ -131,6 +147,7 @@ class KeyManager:
             "verify_key": self.verify_key.encode(encoder=HexEncoder).decode(),
             "public_key": self.public_key.encode(encoder=HexEncoder).decode(),
         }), encoding="utf-8")
+        self._restrict_permissions(pub_path, 0o600)
 
     def load(self, passphrase: str) -> bool:
         """Load and decrypt keys from disk. Returns False if passphrase is wrong."""
@@ -138,12 +155,19 @@ class KeyManager:
         if not key_path.exists():
             return False
 
-        enc_key = self._derive_key(passphrase)
-        box = SecretBox(enc_key)
-
         try:
             encrypted = key_path.read_bytes()
-            decrypted = box.decrypt(encrypted)
+            if encrypted.startswith(b"PMK2"):
+                salt_start = len(b"PMK2")
+                salt = encrypted[salt_start : salt_start + argon2id.SALTBYTES]
+                ciphertext = encrypted[salt_start + argon2id.SALTBYTES :]
+                if len(salt) != argon2id.SALTBYTES:
+                    return False
+            else:
+                salt = self._legacy_salt()
+                ciphertext = encrypted
+            box = SecretBox(self._derive_key(passphrase, salt))
+            decrypted = box.decrypt(ciphertext)
             bundle = json.loads(decrypted.decode("utf-8"))
 
             self._signing_key = SigningKey(
@@ -197,28 +221,25 @@ class KeyManager:
     @staticmethod
     def verify_peer_bundle(bundle: dict[str, str]) -> bool:
         """Validate that a received peer bundle has the correct structure."""
-        return (
-            isinstance(bundle, dict)
-            and "verify_key" in bundle
-            and "public_key" in bundle
-            and len(bundle["verify_key"]) == 64
-            and len(bundle["public_key"]) == 64
-        )
+        if not isinstance(bundle, dict):
+            return False
+        try:
+            return all(
+                isinstance(bundle[key], str)
+                and len(bytes.fromhex(bundle[key])) == 32
+                and len(bundle[key]) == 64
+                for key in ("verify_key", "public_key")
+            )
+        except (KeyError, ValueError):
+            return False
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _derive_key(self, passphrase: str) -> bytes:
+    def _derive_key(self, passphrase: str, salt: bytes | None = None) -> bytes:
         """Derive a 32-byte encryption key from a passphrase using Argon2id."""
-        # Use a deterministic salt derived from "PhantomMessenger" so the
-        # same passphrase always produces the same key (needed for decryption).
-        # Argon2id requires exactly 16 bytes (SALTBYTES) for the salt.
-        salt = blake2b(
-            b"PhantomMessenger-KeyDerivation-Salt",
-            digest_size=argon2id.SALTBYTES,
-            encoder=RawEncoder,
-        )
+        salt = salt or self._legacy_salt()
         return argon2id.kdf(
             KEY_SIZE,
             passphrase.encode("utf-8"),
@@ -226,3 +247,16 @@ class KeyManager:
             opslimit=argon2id.OPSLIMIT_MODERATE,
             memlimit=argon2id.MEMLIMIT_MODERATE,
         )
+
+    @staticmethod
+    def _legacy_salt() -> bytes:
+        return blake2b(
+            b"PhantomMessenger-KeyDerivation-Salt",
+            digest_size=argon2id.SALTBYTES,
+            encoder=RawEncoder,
+        )
+
+    @staticmethod
+    def _restrict_permissions(path: Path, mode: int) -> None:
+        if os.name != "nt":
+            path.chmod(mode)

@@ -23,11 +23,9 @@ else:
     _base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
 
 DATA_DIR: Path = _base / APP_NAME
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH: Path = DATA_DIR / "phantom.db"
 KEYS_DIR: Path = DATA_DIR / "keys"
-KEYS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Bluetooth LE — Custom GATT Service & Characteristic UUIDs
@@ -53,6 +51,7 @@ KEY_SIZE = 32  # X25519 / XSalsa20 key size in bytes
 # ---------------------------------------------------------------------------
 HEADER_SIZE = 11  # type(1) + transfer ID(4) + sequence(2) + total(2) + length(2)
 MAX_MESSAGE_LENGTH = 10_000  # characters, prevents abuse
+MIN_PASSPHRASE_LENGTH = 12
 MAX_CHUNK_PAYLOAD = BLE_MAX_PACKET_SIZE - HEADER_SIZE
 
 # ---------------------------------------------------------------------------

@@ -74,9 +74,12 @@ class Conversation:
 
     contact: Contact
     messages: list[Message] = field(default_factory=list)
+    unread_total: int | None = None
 
     @property
     def unread_count(self) -> int:
+        if self.unread_total is not None:
+            return self.unread_total
         return sum(
             1
             for m in self.messages

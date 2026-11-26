@@ -147,9 +147,9 @@ python -m messenger --debug
 ### First Time Setup
 
 1. Run the app: `./run.sh` or `python -m messenger`
-2. Enter a strong passphrase (8+ characters) — this encrypts your keys and database
-3. Click **"Create New Identity"** to generate your X25519 + Ed25519 key pair
-4. Press **Ctrl+I** to view your public keys (share these with contacts!)
+2. Enter a strong passphrase (12+ characters) — this encrypts your keys and database
+3. Click **Create Identity** and enter the passphrase twice to confirm it
+4. Press **Ctrl+K** to view and copy your key bundle.
 
 ### Connecting Two Devices
 
@@ -164,9 +164,9 @@ python -m messenger --debug
 
 **Via Manual Key Exchange:**
 
-1. Both users: Press **Ctrl+I** to see your public keys
-2. Exchange keys out of band (QR code, paper, etc.)
-3. Press **Ctrl+N** → **Add Manual** → paste their keys
+1. Both users: Press **Ctrl+K** and copy your key bundle
+2. Exchange bundles out of band (for example, in person or through another trusted channel)
+3. Press **Ctrl+N** → **Add Manual** and paste the other person's JSON bundle
 
 ### Sending Messages
 
@@ -180,7 +180,7 @@ python -m messenger --debug
 | Key | Action |
 |-----|--------|
 | `Ctrl+N` | Scan for nearby devices |
-| `Ctrl+I` | Show your identity/public keys |
+| `Ctrl+K` | Show and copy your key bundle |
 | `Ctrl+Q` | Quit |
 | `Enter` | Send message |
 | `Escape` | Close dialog/go back |
