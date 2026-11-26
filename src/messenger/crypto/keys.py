@@ -218,6 +218,26 @@ class KeyManager:
             "public_key": self.public_key.encode(encoder=HexEncoder).decode(),
         }
 
+    def export_private_bundle(self) -> dict[str, str]:
+        return {
+            "signing_key": self.signing_key.encode(encoder=HexEncoder).decode(),
+            "private_key": self.private_key.encode(encoder=HexEncoder).decode(),
+        }
+
+    def restore_private_bundle(self, bundle: dict[str, str], passphrase: str) -> None:
+        signing = SigningKey(bundle["signing_key"], encoder=HexEncoder)
+        private = PrivateKey(bundle["private_key"], encoder=HexEncoder)
+        self._signing_key, self._private_key = signing, private
+        self.reset_files()
+        self.save(passphrase)
+
+    def reset_files(self) -> None:
+        """Remove persisted keys without changing the currently loaded keys."""
+        if self._keys_dir.exists():
+            shutil.rmtree(self._keys_dir)
+        self._keys_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._restrict_permissions(self._keys_dir, 0o700)
+
     @staticmethod
     def verify_peer_bundle(bundle: dict[str, str]) -> bool:
         """Validate that a received peer bundle has the correct structure."""

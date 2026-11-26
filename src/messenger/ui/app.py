@@ -16,7 +16,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Optional
 
 from textual import on, work
@@ -49,6 +51,7 @@ from messenger.config import (
 from messenger.crypto.keys import KeyManager
 from messenger.crypto.encryption import MessageEncryptor
 from messenger.storage.database import DatabaseManager
+from messenger.storage.backup import decrypt_backup, encrypt_backup
 from messenger.storage.models import (
     Contact,
     Conversation,
@@ -154,6 +157,10 @@ Screen {
     height: 1fr;
 }
 
+.compact .contact-item {
+    padding: 0 1;
+}
+
 .contact-item {
     padding: 1 1;
     height: auto;
@@ -241,12 +248,13 @@ Screen {
 
 /* ---- Scan Screen ---- */
 #scan-container {
-    align: center middle;
-    width: 70;
+    width: 1fr;
+    max-width: 70;
     height: auto;
-    max-height: 30;
+    max-height: 90%;
     border: heavy $accent;
-    padding: 2 4;
+    margin: 1 1;
+    padding: 1 2;
     background: $surface;
 }
 
@@ -480,6 +488,287 @@ class CreateProfileScreen(Screen):
         error.styles.display = "block"
 
 
+class RenameContactScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, contact_id: str, current_name: str) -> None:
+        super().__init__()
+        self.contact_id = contact_id
+        self.current_name = current_name
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("RENAME CONTACT", id="scan-title"),
+            Input(value=self.current_name, placeholder="Contact name", id="contact-name-input"),
+            Horizontal(
+                Button("Save", variant="primary", id="save-contact-name-btn"),
+                Button("Cancel", variant="default", id="cancel-contact-name-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#save-contact-name-btn")
+    def save_name(self) -> None:
+        name = self.query_one("#contact-name-input", Input).value.strip()
+        if not name:
+            self.app.notify("Enter a name for this contact.", severity="warning")
+            return
+        self.app.post_message(self.RenameContact(self.contact_id, name))
+        self.dismiss()
+
+    @on(Button.Pressed, "#cancel-contact-name-btn")
+    def cancel(self) -> None:
+        self.dismiss()
+
+    class RenameContact(TMessage):
+        def __init__(self, contact_id: str, name: str) -> None:
+            super().__init__()
+            self.contact_id = contact_id
+            self.name = name
+
+
+class VerifyPeerScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, bundle: dict[str, str], fingerprint: str) -> None:
+        super().__init__()
+        self.bundle = bundle
+        self.fingerprint = fingerprint
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("VERIFY NEW CONTACT", id="scan-title"),
+            Static(
+                "Compare this code with your contact over a trusted channel. "
+                "Only trust the contact if both codes match.",
+                id="scan-status",
+            ),
+            Static(self.fingerprint, id="peer-fingerprint", markup=False),
+            Horizontal(
+                Button("Trust Contact", variant="primary", id="trust-contact-btn"),
+                Button("Cancel", variant="default", id="cancel-trust-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#trust-contact-btn")
+    def trust_contact(self) -> None:
+        self.app.post_message(self.TrustPeer(self.bundle))
+        self.dismiss()
+
+    @on(Button.Pressed, "#cancel-trust-btn")
+    def cancel(self) -> None:
+        self.dismiss()
+
+    class TrustPeer(TMessage):
+        def __init__(self, bundle: dict[str, str]) -> None:
+            super().__init__()
+            self.bundle = bundle
+
+
+class ConfirmRemoveContactScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, contact_id: str) -> None:
+        super().__init__()
+        self.contact_id = contact_id
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("REMOVE CONTACT?", id="scan-title"),
+            Static("This also permanently deletes this contact's conversation.", id="scan-status"),
+            Horizontal(
+                Button("Delete Contact and Chat", variant="error", id="confirm-remove-contact-btn"),
+                Button("Cancel", variant="default", id="cancel-remove-contact-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#confirm-remove-contact-btn")
+    def confirm_remove(self) -> None:
+        self.app.post_message(self.RemoveContact(self.contact_id))
+        self.dismiss()
+
+    @on(Button.Pressed, "#cancel-remove-contact-btn")
+    def cancel(self) -> None:
+        self.dismiss()
+
+    class RemoveContact(TMessage):
+        def __init__(self, contact_id: str) -> None:
+            super().__init__()
+            self.contact_id = contact_id
+
+
+class BackupRestoreScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Container(
+                Static("ENCRYPTED PROFILE BACKUP", id="scan-title"),
+                Static(
+                    "Backups include your identity, contacts, messages, and drafts. "
+                    "Choose a strong backup password and keep the file somewhere safe. "
+                    "Restoring replaces this profile.",
+                    id="scan-status",
+                ),
+                Input(value=str(Path.home() / "Documents" / "phantom-backup.pmb"), placeholder="Backup file path", id="backup-path"),
+                Input(placeholder="Backup password (12+ characters)", password=True, id="backup-password"),
+                Input(placeholder="New profile password for restore", password=True, id="restore-password"),
+                Input(placeholder="Confirm new profile password", password=True, id="restore-password-confirm"),
+                Input(placeholder="Type RESTORE to replace this profile", id="restore-confirm"),
+                Static("", id="login-error"),
+                Horizontal(
+                    Button("Create Backup", variant="primary", id="create-backup-btn"),
+                    Button("Restore Backup", variant="error", id="restore-backup-btn"),
+                    Button("Close", variant="default", id="close-backup-btn"),
+                    classes="scan-btn-row",
+                ),
+                id="login-container",
+            ),
+            id="login-scroll",
+        )
+
+    @on(Button.Pressed, "#create-backup-btn")
+    def create_backup(self) -> None:
+        path = self.query_one("#backup-path", Input).value.strip()
+        password = self.query_one("#backup-password", Input).value
+        if len(password) < MIN_PASSPHRASE_LENGTH or not path:
+            self._show_error("Choose a file path and a backup password of at least 12 characters.")
+            return
+        self.app.post_message(self.BackupAction("create", path, password))
+
+    @on(Button.Pressed, "#restore-backup-btn")
+    def restore_backup(self) -> None:
+        path = self.query_one("#backup-path", Input).value.strip()
+        backup_password = self.query_one("#backup-password", Input).value
+        new_password = self.query_one("#restore-password", Input).value
+        confirmation = self.query_one("#restore-password-confirm", Input).value
+        if self.query_one("#restore-confirm", Input).value != "RESTORE":
+            self._show_error("Type RESTORE to confirm replacing this profile.")
+        elif len(new_password) < MIN_PASSPHRASE_LENGTH:
+            self._show_error("The new profile password must be at least 12 characters.")
+        elif new_password != confirmation:
+            self._show_error("The new profile passwords don't match.")
+        elif not backup_password or not path:
+            self._show_error("Enter the backup file path and its password.")
+        else:
+            self.app.post_message(self.BackupAction("restore", path, backup_password, new_password))
+
+    @on(Button.Pressed, "#close-backup-btn")
+    def close(self) -> None:
+        self.dismiss()
+
+    def _show_error(self, text: str) -> None:
+        error = self.query_one("#login-error", Static)
+        error.update(text)
+        error.styles.display = "block"
+
+    class BackupAction(TMessage):
+        def __init__(self, action: str, path: str, backup_password: str, new_password: str = "") -> None:
+            super().__init__()
+            self.action = action
+            self.path = path
+            self.backup_password = backup_password
+            self.new_password = new_password
+
+
+class KeyboardHelpScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("KEYBOARD SHORTCUTS", id="scan-title"),
+            Static(
+                "Ctrl+N   Scan for nearby devices\n"
+                "Ctrl+A   Start advertising\n"
+                "Ctrl+K   Show your key bundle\n"
+                "Ctrl+M   Toggle compact mode\n"
+                "Ctrl+H   Show this help\n"
+                "Ctrl+Q   Quit\n"
+                "Enter    Send a message\n"
+                "Escape   Close the current screen",
+                id="scan-status",
+                markup=False,
+            ),
+            Button("Close", variant="primary", id="close-help-btn"),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#close-help-btn")
+    def close_help(self) -> None:
+        self.dismiss()
+
+
+class ToolsScreen(Screen):
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def __init__(self, contact_id: str | None) -> None:
+        super().__init__()
+        self.contact_id = contact_id
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Container(
+                Static("TOOLS", id="scan-title"),
+                Button("Rename Contact", id="tool-rename", disabled=not self.contact_id),
+                Button("Retry Pending Messages", id="tool-retry", disabled=not self.contact_id),
+                Button("Remove Contact and Chat", variant="error", id="tool-remove", disabled=not self.contact_id),
+                Button("Export Conversation", id="tool-export", disabled=not self.contact_id),
+                Button("Encrypted Backup / Restore", id="tool-backup"),
+                Button("Disconnect", id="tool-disconnect"),
+                Button("Compact Mode", id="tool-compact"),
+                Button("Keyboard Help", id="tool-help"),
+                Button("Close", variant="default", id="tool-close"),
+                id="scan-container",
+            ),
+            id="login-scroll",
+        )
+
+    @on(Button.Pressed, "#tool-rename")
+    def rename(self) -> None:
+        self._select("rename")
+
+    @on(Button.Pressed, "#tool-retry")
+    def retry(self) -> None:
+        self._select("retry")
+
+    @on(Button.Pressed, "#tool-remove")
+    def remove_contact(self) -> None:
+        self._select("remove")
+
+    @on(Button.Pressed, "#tool-export")
+    def export(self) -> None:
+        self._select("export")
+
+    @on(Button.Pressed, "#tool-backup")
+    def backup(self) -> None:
+        self._select("backup")
+
+    @on(Button.Pressed, "#tool-disconnect")
+    def disconnect(self) -> None:
+        self._select("disconnect")
+
+    @on(Button.Pressed, "#tool-compact")
+    def compact(self) -> None:
+        self._select("compact")
+
+    @on(Button.Pressed, "#tool-help")
+    def help(self) -> None:
+        self._select("help")
+
+    @on(Button.Pressed, "#tool-close")
+    def close(self) -> None:
+        self.dismiss()
+
+    def _select(self, action: str) -> None:
+        self.app.post_message(MainScreen.ToolAction(action, self.contact_id))
+        self.dismiss()
+
+
 # ======================================================================
 # Main Screen
 # ======================================================================
@@ -492,6 +781,8 @@ class MainScreen(Screen):
         Binding("ctrl+n", "scan", "Scan for Devices"),
         Binding("ctrl+a", "advertise", "Advertise"),
         Binding("ctrl+k", "show_keys", "My Keys"),
+        Binding("ctrl+m", "toggle_compact", "Compact Mode"),
+        Binding("ctrl+h", "show_help", "Help"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
@@ -507,13 +798,16 @@ class MainScreen(Screen):
         with Horizontal(id="main-layout"):
             with Vertical(id="sidebar"):
                 yield Static("  CONTACTS", id="sidebar-header")
+                yield Input(placeholder="Search contacts and messages", id="contact-search")
                 yield ListView(id="contact-list")
-                yield Button("+ Scan", variant="primary", id="add-contact-btn")
+                yield Button("Connect Nearby", variant="primary", id="add-contact-btn")
                 yield Button("Advertise", variant="default", id="advertise-btn")
                 yield Button("My Keys", variant="default", id="show-keys-btn")
+                yield Button("Tools", variant="default", id="tools-btn")
             with Vertical(id="right-panel"):
                 with Vertical(id="chat-panel"):
                     yield Static("  Select a contact", id="chat-header", markup=False)
+                    yield Button("Load older messages", variant="default", id="load-older-btn")
                     yield ScrollableContainer(
                         Static(
                             "Select a contact to start chatting\n\n"
@@ -534,7 +828,19 @@ class MainScreen(Screen):
 
     def on_mount(self) -> None:
         """When MainScreen is fully mounted, ask the app to populate contacts."""
+        self._visible_messages = []
+        self._draft_timer = None
+        self.query_one("#load-older-btn", Button).disabled = True
         self.app.post_message(self.RefreshRequest())
+
+    def on_unmount(self) -> None:
+        if self._draft_timer:
+            self._draft_timer.stop()
+        if self.selected_contact:
+            self.app.db_manager.save_draft(
+                self.selected_contact,
+                self.query_one("#message-input", Input).value,
+            )
 
     class RefreshRequest(TMessage):
         """Request the app to refresh the contact list."""
@@ -569,12 +875,37 @@ class MainScreen(Screen):
         self.app.post_message(self.SendMessage(self.selected_contact, text))
         inp.value = ""
 
+    @on(Input.Changed, "#message-input")
+    def save_message_draft(self, event: Input.Changed) -> None:
+        if self.selected_contact:
+            if self._draft_timer:
+                self._draft_timer.stop()
+            contact_id, content = self.selected_contact, event.value
+            self._draft_timer = self.set_timer(
+                0.5, lambda: self.app.db_manager.save_draft(contact_id, content)
+            )
+
     @on(Button.Pressed, "#add-contact-btn")
     def handle_scan_btn(self) -> None:
         self.action_scan()
 
     def action_scan(self) -> None:
         self.app.push_screen(ScanScreen())
+
+    @on(Input.Changed, "#contact-search")
+    def handle_contact_search(self, event: Input.Changed) -> None:
+        self.app._refresh_ui(event.value)
+
+    @on(Button.Pressed, "#load-older-btn")
+    def handle_load_older(self) -> None:
+        if self.selected_contact and self._visible_messages:
+            self.app.post_message(
+                self.LoadOlder(self.selected_contact, self._visible_messages[0].timestamp)
+            )
+
+    @on(Button.Pressed, "#tools-btn")
+    def handle_tools(self) -> None:
+        self.app.push_screen(ToolsScreen(self.selected_contact))
 
     @on(Button.Pressed, "#advertise-btn")
     def handle_advertise_btn(self) -> None:
@@ -586,6 +917,11 @@ class MainScreen(Screen):
     class StartAdvertise(TMessage):
         pass
 
+    class RetryPending(TMessage):
+        def __init__(self, contact_id: str) -> None:
+            super().__init__()
+            self.contact_id = contact_id
+
     @on(Button.Pressed, "#show-keys-btn")
     def handle_show_keys_btn(self) -> None:
         self.action_show_keys()
@@ -593,8 +929,34 @@ class MainScreen(Screen):
     def action_show_keys(self) -> None:
         self.app.post_message(self.ShowKeys())
 
+    def action_toggle_compact(self) -> None:
+        self.toggle_class("compact")
+
+    def action_show_help(self) -> None:
+        self.app.push_screen(KeyboardHelpScreen())
+
     class ShowKeys(TMessage):
         pass
+
+    class Disconnect(TMessage):
+        pass
+
+    class ExportConversation(TMessage):
+        def __init__(self, contact_id: str) -> None:
+            super().__init__()
+            self.contact_id = contact_id
+
+    class ToolAction(TMessage):
+        def __init__(self, action: str, contact_id: str | None) -> None:
+            super().__init__()
+            self.action = action
+            self.contact_id = contact_id
+
+    class LoadOlder(TMessage):
+        def __init__(self, contact_id: str, before: float) -> None:
+            super().__init__()
+            self.contact_id = contact_id
+            self.before = before
 
     @on(ListView.Selected, "#contact-list")
     def handle_contact_selected(self, event: ListView.Selected) -> None:
@@ -606,6 +968,7 @@ class MainScreen(Screen):
             raw_id = self._contact_index_map[idx]
             if self.selected_contact != raw_id:
                 self.selected_contact = raw_id
+                self.query_one("#message-input", Input).value = self.app.db_manager.get_draft(raw_id)
                 logger.info(f"Contact selected: {self.selected_contact}")
                 self.app.post_message(self.ContactSelected(self.selected_contact))
 
@@ -649,9 +1012,13 @@ class MainScreen(Screen):
         """Refresh the chat panel with messages for the selected contact."""
         header = self.query_one("#chat-header", Static)
         header.update(f"  {contact.name or contact.short_id}")
+        self.query_one("#message-input", Input).value = self.app.db_manager.get_draft(contact.id)
 
         container = self.query_one("#chat-messages", ScrollableContainer)
         container.remove_children()
+        self._visible_messages = list(messages)
+        load_older = self.query_one("#load-older-btn", Button)
+        load_older.disabled = len(messages) < 100
 
         if not messages:
             container.mount(
@@ -672,9 +1039,11 @@ class MainScreen(Screen):
                     delivery_status = " (not sent; will retry when connected)"
                 else:
                     delivery_status = " (waiting to send)"
+            elif msg.is_read:
+                delivery_status = " (read on this device)"
 
             line = Static(
-                f"[{msg.time_display}] {prefix}: {msg.content}{delivery_status}",
+                f"[{msg.date_display} {msg.time_display}] {prefix}: {msg.content}{delivery_status}",
                 classes=f"msg-row {direction_class}",
                 markup=False,
             )
@@ -682,6 +1051,17 @@ class MainScreen(Screen):
 
         # Scroll to bottom
         container.scroll_end(animate=False)
+
+    _visible_messages: list[ChatMessage] = []
+
+    def clear_chat(self) -> None:
+        self._visible_messages = []
+        self.query_one("#chat-header", Static).update("  Select a contact")
+        self.query_one("#chat-messages", ScrollableContainer).remove_children()
+        self.query_one("#chat-messages", ScrollableContainer).mount(
+            Static("Select a contact to start chatting", classes="empty-chat-placeholder", markup=False)
+        )
+        self.query_one("#load-older-btn", Button).disabled = True
 
     # Custom messages
     class SendMessage(TMessage):
@@ -930,6 +1310,7 @@ class PhantomApp(App):
         self.db_manager = db_manager
         self.transport = transport
         self._assembler = ChunkAssembler()
+        self._connection_status_text = "Disconnected. Pending messages will send when reconnected."
         self._encryptors: dict[str, MessageEncryptor] = {}
         self._pending_deliveries: dict[bytes, ChatMessage] = {}
         self._sending_message_ids: set[str] = set()
@@ -958,6 +1339,56 @@ class PhantomApp(App):
         self.notify("Profile deleted. Create a new identity to continue.", severity="information")
         if isinstance(self.screen, LoginScreen):
             self.switch_screen(CreateProfileScreen())
+
+    @on(VerifyPeerScreen.TrustPeer)
+    @work(thread=False)
+    async def handle_trust_peer(self, message: VerifyPeerScreen.TrustPeer) -> None:
+        await self._accept_peer_bundle(message.bundle)
+
+    @on(BackupRestoreScreen.BackupAction)
+    @work(thread=False)
+    async def handle_backup_action(self, message: BackupRestoreScreen.BackupAction) -> None:
+        path = Path(message.path).expanduser()
+        try:
+            if message.action == "create":
+                snapshot = {
+                    "version": 1,
+                    "keys": self.key_manager.export_private_bundle(),
+                    **self.db_manager.export_profile_data(),
+                }
+                blob = encrypt_backup(snapshot, message.backup_password)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(path.suffix + ".tmp")
+                temporary.write_bytes(blob)
+                if os.name != "nt":
+                    temporary.chmod(0o600)
+                temporary.replace(path)
+                self.notify(f"Encrypted backup saved to {path}", severity="information")
+            else:
+                snapshot = decrypt_backup(path.read_bytes(), message.backup_password)
+                if snapshot.get("version") != 1 or not all(
+                    isinstance(snapshot.get(key), list) for key in ("contacts", "messages", "drafts")
+                ):
+                    raise ValueError("Backup contents are incomplete")
+                key_bundle = snapshot.get("keys")
+                if not isinstance(key_bundle, dict) or set(("signing_key", "private_key")) - key_bundle.keys():
+                    raise ValueError("Backup does not contain an identity")
+                self.db_manager.restore_profile_data(snapshot)
+                self.db_manager.rekey(message.new_password)
+                self.key_manager.restore_private_bundle(key_bundle, message.new_password)
+                self._encryptors.clear()
+                self._pending_deliveries.clear()
+                self._sending_message_ids.clear()
+                if self.transport and self.transport.is_connected():
+                    await self.transport.stop()
+                self._refresh_ui("")
+                current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+                if current and current.selected_contact:
+                    self._refresh_chat(current.selected_contact)
+                self.notify("Profile restored. Your new profile password is now active.", severity="information")
+        except Exception as exc:
+            logger.error("Profile backup operation failed: %s", exc)
+            self.notify(f"Backup could not be completed: {exc}", severity="error")
 
     @on(LoginScreen.Unlock)
     def handle_unlock(self, message: LoginScreen.Unlock) -> None:
@@ -1038,6 +1469,8 @@ class PhantomApp(App):
             self._set_connection_status("Connected to a nearby device.")
         elif isinstance(self.transport, BLEPeripheral) and self.transport.is_advertising():
             self._set_connection_status("Advertising and waiting for a device.")
+        else:
+            self._set_connection_status("Disconnected. Pending messages will send when reconnected.")
 
     @on(MainScreen.ContactSelected)
     def handle_contact_selected(self, message: MainScreen.ContactSelected) -> None:
@@ -1045,12 +1478,117 @@ class PhantomApp(App):
         if contact is None:
             return
 
-        messages = self.db_manager.get_messages(contact.id)
         self.db_manager.mark_messages_read(contact.id)
+        messages = self.db_manager.get_messages(contact.id)
+        self._refresh_ui()
 
         current = self.screen
         if isinstance(current, MainScreen):
             current.refresh_messages(contact, messages)
+
+    @on(RenameContactScreen.RenameContact)
+    def handle_rename_contact(self, message: RenameContactScreen.RenameContact) -> None:
+        contact = self.db_manager.get_contact(message.contact_id)
+        if contact:
+            contact.name = message.name
+            self.db_manager.save_contact(contact)
+            self._refresh_ui()
+            self._refresh_chat(contact.id)
+
+    @on(MainScreen.ToolAction)
+    def handle_tool_action(self, message: MainScreen.ToolAction) -> None:
+        contact_id = message.contact_id
+        if message.action == "rename" and contact_id:
+            contact = self.db_manager.get_contact(contact_id)
+            if contact:
+                self.push_screen(RenameContactScreen(contact.id, contact.name))
+        elif message.action == "retry" and contact_id:
+            self._retry_pending_messages(contact_id)
+        elif message.action == "remove" and contact_id:
+            self.push_screen(ConfirmRemoveContactScreen(contact_id))
+        elif message.action == "export" and contact_id:
+            self.handle_export_conversation(MainScreen.ExportConversation(contact_id))
+        elif message.action == "backup":
+            self.push_screen(BackupRestoreScreen())
+        elif message.action == "disconnect":
+            self.handle_disconnect()
+        elif message.action == "compact":
+            main = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+            if main:
+                main.action_toggle_compact()
+        elif message.action == "help":
+            self.push_screen(KeyboardHelpScreen())
+
+    @on(MainScreen.RetryPending)
+    def handle_retry_pending(self, message: MainScreen.RetryPending) -> None:
+        self._retry_pending_messages(message.contact_id)
+
+    @work(thread=False)
+    async def _retry_pending_messages(self, contact_id: str) -> None:
+        if not self.transport or not self.transport.is_connected():
+            self.notify("Connect to this contact before retrying queued messages.", severity="warning")
+            return
+        contact = self.db_manager.get_contact(contact_id)
+        if not contact:
+            return
+        pending = self.db_manager.get_undelivered_messages(contact_id)
+        awaiting_ack = {item.id for item in self._pending_deliveries.values()}
+        pending = [item for item in pending if item.id not in awaiting_ack]
+        for message in pending:
+            if not self.transport.is_connected():
+                break
+            message.status = MessageStatus.PENDING
+            self.db_manager.update_message_status(message.id, message.status)
+            await self._transmit_message(contact, message)
+        if pending:
+            self.notify(f"Retried {len(pending)} pending message(s).", severity="information")
+        else:
+            self.notify("There are no pending messages for this contact.", severity="information")
+
+    @on(ConfirmRemoveContactScreen.RemoveContact)
+    def handle_remove_contact(self, message: ConfirmRemoveContactScreen.RemoveContact) -> None:
+        self.db_manager.delete_contact(message.contact_id)
+        current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+        if current and current.selected_contact == message.contact_id:
+            current.selected_contact = None
+            current.clear_chat()
+        self._refresh_ui()
+
+    @on(MainScreen.ExportConversation)
+    def handle_export_conversation(self, message: MainScreen.ExportConversation) -> None:
+        contact = self.db_manager.get_contact(message.contact_id)
+        if not contact:
+            return
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in (contact.name or contact.short_id))
+        export_path = Path.home() / "Documents" / f"Phantom-{safe_name}.txt"
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"Conversation with {contact.name or contact.short_id}", ""]
+        for item in self.db_manager.get_messages(contact.id, limit=100000):
+            speaker = "You" if item.direction == MessageDirection.SENT else contact.name or contact.short_id
+            lines.append(f"[{item.date_display} {item.time_display}] {speaker}: {item.content}")
+        export_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.notify(f"Conversation exported to {export_path}", severity="information")
+
+    @on(MainScreen.LoadOlder)
+    def handle_load_older(self, message: MainScreen.LoadOlder) -> None:
+        contact = self.db_manager.get_contact(message.contact_id)
+        current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+        if not contact or not current:
+            return
+        older = self.db_manager.get_messages(contact.id, before=message.before)
+        if not older:
+            current.query_one("#load-older-btn", Button).disabled = True
+            return
+        current.refresh_messages(contact, older + current._visible_messages)
+        current.query_one("#load-older-btn", Button).disabled = len(older) < 100
+        self.call_later(lambda: current.query_one("#chat-messages", ScrollableContainer).scroll_home(animate=False))
+
+    @on(MainScreen.Disconnect)
+    @work(thread=False)
+    async def handle_disconnect(self) -> None:
+        if self.transport:
+            await self.transport.stop()
+        self._set_connection_status("Disconnected. Pending messages will send when reconnected.")
 
     @on(MainScreen.SendMessage)
     def handle_send_message(self, message: MainScreen.SendMessage) -> None:
@@ -1066,6 +1604,7 @@ class PhantomApp(App):
             status=MessageStatus.PENDING,
         )
         self.db_manager.save_message(chat_msg)
+        self._set_connection_status(self._connection_status_text)
 
         # Refresh UI immediately so the message appears
         self._refresh_chat(contact.id)
@@ -1113,6 +1652,7 @@ class PhantomApp(App):
         finally:
             self._sending_message_ids.discard(chat_msg.id)
             self.db_manager.update_message_status(chat_msg.id, chat_msg.status)
+            self._set_connection_status(self._connection_status_text)
             self._refresh_chat(contact.id)
 
     # ------------------------------------------------------------------
@@ -1227,6 +1767,7 @@ class PhantomApp(App):
                         self._pending_deliveries.pop(delivery_id, None)
                         message.status = MessageStatus.DELIVERED
                         self.db_manager.update_message_status(message.id, message.status)
+                        self._set_connection_status(self._connection_status_text)
                         self.call_later(lambda c=message.contact_id: self._refresh_chat(c))
 
     async def _handle_key_exchange(self, payload: bytes) -> None:
@@ -1241,35 +1782,43 @@ class PhantomApp(App):
             verify_key = bundle["verify_key"].lower()
             existing = self.db_manager.get_contact_by_public_key(public_key)
             if existing:
-                contact = existing
-                existing.last_seen = time.time()
-                self.db_manager.save_contact(existing)
-                logger.info(f"Reconnected with {existing.name}")
+                if existing.verify_key != verify_key:
+                    self.notify("This contact's identity key changed. Verify it before continuing.", severity="error")
+                    return
+                await self._accept_peer_bundle(bundle, existing)
             else:
-                contact = Contact(
-                    name=public_key[:8],
-                    public_key=public_key,
-                    verify_key=verify_key,
-                    last_seen=time.time(),
-                )
-                self.db_manager.save_contact(contact)
-                logger.info(f"New contact saved: {contact.name}")
-
-            self.call_later(self._refresh_ui)
-
-            # Reply with our keys if expected
-            if bundle.get("reply", True) and self.transport and self.transport.is_connected():
-                my_bundle = self.key_manager.get_public_bundle()
-                my_bundle["reply"] = False
-                reply_payload = json.dumps(my_bundle).encode()
-                chunks = self._chunk_message(MessageType.KEY_EXCHANGE, reply_payload)
-                for chunk in chunks:
-                    await self.transport.send(chunk.to_bytes())
-
-            await self._flush_pending_messages(contact)
+                fingerprint = self._peer_fingerprint(self.key_manager.identity_hex, verify_key)
+                self.push_screen(VerifyPeerScreen(bundle, fingerprint))
 
         except Exception as exc:
             logger.error("Key exchange failed: %s", exc, exc_info=True)
+
+    async def _accept_peer_bundle(self, bundle: dict[str, str], contact: Contact | None = None) -> None:
+        public_key = bundle["public_key"].lower()
+        verify_key = bundle["verify_key"].lower()
+        contact = contact or self.db_manager.get_contact_by_public_key(public_key)
+        if contact is None:
+            contact = Contact(name=public_key[:8], public_key=public_key, verify_key=verify_key)
+        elif contact.verify_key != verify_key:
+            self.notify("The contact identity key changed. Contact was not updated.", severity="error")
+            return
+        contact.last_seen = time.time()
+        self.db_manager.save_contact(contact)
+        self.call_later(self._refresh_ui)
+
+        if bundle.get("reply", True) and self.transport and self.transport.is_connected():
+            my_bundle = self.key_manager.get_public_bundle()
+            my_bundle["reply"] = False
+            payload = json.dumps(my_bundle).encode()
+            for chunk in self._chunk_message(MessageType.KEY_EXCHANGE, payload):
+                await self.transport.send(chunk.to_bytes())
+        await self._flush_pending_messages(contact)
+
+    @staticmethod
+    def _peer_fingerprint(first_key: str, second_key: str) -> str:
+        keys = sorted((bytes.fromhex(first_key), bytes.fromhex(second_key)))
+        digest = hashlib.sha256(b"PhantomMessenger-Contact-Check-v1" + b"".join(keys)).hexdigest()[:16]
+        return " ".join(digest[i : i + 4].upper() for i in range(0, len(digest), 4))
 
     async def _flush_pending_messages(self, contact: Contact) -> None:
         if not self.transport or not self.transport.is_connected():
@@ -1407,6 +1956,10 @@ class PhantomApp(App):
         return self._encryptors[contact.id]
 
     def _set_connection_status(self, status: str) -> None:
+        self._connection_status_text = status
+        queued = self.db_manager.get_pending_count()
+        if queued:
+            status = f"{status} {queued} message(s) queued."
         for screen in self.screen_stack:
             if isinstance(screen, MainScreen):
                 try:
@@ -1423,7 +1976,7 @@ class PhantomApp(App):
         )
         return chunk_message(msg_type, payload, max_payload_size=max_payload)
 
-    def _refresh_ui(self) -> None:
+    def _refresh_ui(self, query: str | None = None) -> None:
         """Refresh the sidebar contacts list."""
         current = next(
             (screen for screen in reversed(self.screen_stack) if isinstance(screen, MainScreen)),
@@ -1431,7 +1984,9 @@ class PhantomApp(App):
         )
         if current is None:
             return
-        conversations = self.db_manager.get_conversations()
+        if query is None:
+            query = current.query_one("#contact-search", Input).value
+        conversations = self.db_manager.get_conversations(query)
         current.refresh_contacts(conversations)
 
     def _refresh_chat(self, contact_id: str) -> None:

@@ -76,6 +76,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_contact
 
 CREATE INDEX IF NOT EXISTS idx_contacts_public_key
     ON contacts(public_key);
+
+CREATE TABLE IF NOT EXISTS drafts (
+    contact_id TEXT PRIMARY KEY,
+    content TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
 """
 
 
@@ -336,6 +342,43 @@ class DatabaseManager:
         ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
+    def get_pending_count(self) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) FROM messages WHERE direction='sent' AND status IN ('pending', 'failed')"
+        ).fetchone()
+        return int(row[0])
+
+    def export_profile_data(self) -> dict:
+        return {
+            "contacts": [list(row) for row in self._db.execute(
+                "SELECT id, name, public_key, verify_key, last_seen, created_at FROM contacts"
+            )],
+            "messages": [list(row) for row in self._db.execute(
+                "SELECT id, contact_id, content, timestamp, direction, status, is_read FROM messages"
+            )],
+            "drafts": [list(row) for row in self._db.execute(
+                "SELECT contact_id, content FROM drafts"
+            )],
+        }
+
+    def restore_profile_data(self, data: dict) -> None:
+        with self._db:
+            self._db.execute("DELETE FROM contacts")
+            self._db.executemany(
+                "INSERT INTO contacts VALUES (?, ?, ?, ?, ?, ?)", data["contacts"]
+            )
+            self._db.executemany(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)", data["messages"]
+            )
+            self._db.executemany(
+                "INSERT INTO drafts VALUES (?, ?)", data.get("drafts", [])
+            )
+
+    def rekey(self, passphrase: str) -> None:
+        safe_pass = passphrase.replace("'", "''")
+        self._db.execute(f"PRAGMA rekey='{safe_pass}'")
+        self._db.execute("SELECT count(*) FROM sqlite_master").fetchone()
+
     def update_message_status(self, message_id: str, status: MessageStatus) -> None:
         """Update the delivery status of a message."""
         self._db.execute(
@@ -348,7 +391,7 @@ class DatabaseManager:
     # Conversations
     # ------------------------------------------------------------------
 
-    def get_conversations(self) -> list[Conversation]:
+    def get_conversations(self, query: str = "") -> list[Conversation]:
         """Fetch sidebar summaries in one query instead of loading 50 messages per contact."""
         rows = self._db.execute(
             """
@@ -366,8 +409,14 @@ class DatabaseManager:
                 WHERE direction = 'received' AND is_read = 0
                 GROUP BY contact_id
             ) u ON u.contact_id = c.id
+            WHERE ? = '' OR c.name LIKE ? OR EXISTS (
+                SELECT 1 FROM messages search_messages
+                WHERE search_messages.contact_id = c.id
+                  AND search_messages.content LIKE ?
+            )
             ORDER BY COALESCE(m.timestamp, 0) DESC
             """
+            , (query, f"%{query}%", f"%{query}%")
         ).fetchall()
         conversations = []
         for row in rows:
@@ -381,6 +430,20 @@ class DatabaseManager:
                 )
             )
         return conversations
+
+    def save_draft(self, contact_id: str, content: str) -> None:
+        self._db.execute(
+            "INSERT INTO drafts(contact_id, content) VALUES (?, ?) "
+            "ON CONFLICT(contact_id) DO UPDATE SET content=excluded.content",
+            (contact_id, content),
+        )
+        self._db.commit()
+
+    def get_draft(self, contact_id: str) -> str:
+        row = self._db.execute(
+            "SELECT content FROM drafts WHERE contact_id=?", (contact_id,)
+        ).fetchone()
+        return row[0] if row else ""
 
     # ------------------------------------------------------------------
     # Helpers

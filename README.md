@@ -160,7 +160,8 @@ python -m messenger --debug
 | `./run.sh` → Log in | `./run.sh` → Log in |
 | Click **Advertise** | Click **+ Scan** |
 | Wait for connection... | Select Device A from list |
-| The devices exchange keys automatically. | The new contact appears in the sidebar. |
+| A verification code appears for the new contact. | Compare the code with the other device through a trusted channel, then choose **Trust Contact**. |
+| Compare the same code and choose **Trust Contact**. | The verified contact appears in the sidebar. |
 
 **Via Manual Key Exchange:**
 
@@ -180,10 +181,18 @@ python -m messenger --debug
 | Key | Action |
 |-----|--------|
 | `Ctrl+N` | Scan for nearby devices |
+| `Ctrl+A` | Start advertising |
 | `Ctrl+K` | Show and copy your key bundle |
+| `Ctrl+M` | Toggle compact mode |
+| `Ctrl+H` | Show keyboard help |
 | `Ctrl+Q` | Quit |
 | `Enter` | Send message |
 | `Escape` | Close dialog/go back |
+
+The **Tools** menu contains contact rename/removal, message retry, conversation export,
+encrypted profile backup/restore, connection controls, and keyboard help. Search contacts
+and message text from the sidebar. Select **Load older messages** to page through history.
+Backups include the identity and local conversations; keep the separate backup password safe.
 
 ## Project Structure
 
