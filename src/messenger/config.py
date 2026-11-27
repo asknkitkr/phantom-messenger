@@ -8,7 +8,7 @@ from pathlib import Path
 # Application Identity
 # ---------------------------------------------------------------------------
 APP_NAME = "PhantomMessenger"
-APP_VERSION = "1.0.0"
+APP_VERSION = "0.0.1"
 
 # ---------------------------------------------------------------------------
 # Data Directories (platform-specific)
