@@ -17,6 +17,9 @@ Phantom Messenger lets nearby devices exchange encrypted text messages over Blue
 - **Text only:** messages cannot include images or attachments; emoji and some special characters are not supported.
 - **Passphrase protected:** identity keys are encrypted with a key derived using Argon2id.
 - **Terminal app:** the interface is built with [Textual](https://textual.textualize.io/).
+- **User controls:** block contacts, set local message expiry, make encrypted backups, and wipe this device's profile when necessary.
+- **Mesh visibility:** see queued relay packets and whether a contact is directly connected or has relay work waiting.
+- **Language choice:** the main chat screen is available in English, Hindi, and Spanish.
 
 ## Architecture
 
@@ -205,10 +208,17 @@ to keep the simulation profiles for inspection.
 | `Enter` | Send message |
 | `Escape` | Close dialog/go back |
 
-The **Tools** menu contains contact rename/removal, message retry, conversation export,
-encrypted profile backup/restore, connection controls, and keyboard help. Search contacts
-and message text from the sidebar. Select **Load older messages** to page through history.
-Backups include the identity and local conversations; keep the separate backup password safe.
+The **Tools** menu contains contact rename/removal, blocking, message retry, conversation export,
+encrypted profile backup/restore, message expiry, connection controls, a relay dashboard, emergency
+broadcast, language selection, and keyboard help. Search contacts and message text from the sidebar.
+Select **Load older messages** to page through history. Backups include the identity and local
+conversations; keep the separate backup password safe.
+
+Use **Panic Wipe** only when you need to permanently remove this device's local identity, contacts,
+messages, drafts, and queued relay packets. It requires typing `WIPE` and closes the app afterwards.
+Message expiry removes local copies after the selected period; it cannot remove copies already on
+another device. Emergency broadcasts are encrypted and signed for each unblocked trusted contact,
+and are queued until a relay path becomes available.
 
 ## Project Structure
 

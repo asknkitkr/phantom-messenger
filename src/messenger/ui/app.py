@@ -70,7 +70,7 @@ from messenger.transport.protocol import (
     chunk_message,
     Chunk,
 )
-from messenger.transport.mesh import RelayEnvelope
+from messenger.transport.mesh import MAX_HOPS, RelayEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -713,6 +713,186 @@ class BackupRestoreScreen(Screen):
             self.new_password = new_password
 
 
+class MessageExpiryScreen(Screen):
+    """Choose how long messages remain on this device."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("MESSAGE EXPIRY", id="scan-title"),
+            Static(
+                "Expired messages are removed from this device the next time the app refreshes.",
+                id="scan-status",
+            ),
+            Button("Never delete messages", classes="expiry-choice", id="expiry-0"),
+            Button("Delete after 1 hour", classes="expiry-choice", id="expiry-3600"),
+            Button("Delete after 1 day", classes="expiry-choice", id="expiry-86400"),
+            Button("Delete after 7 days", classes="expiry-choice", id="expiry-604800"),
+            Button("Close", variant="default", id="close-expiry-btn"),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, ".expiry-choice")
+    def choose_expiry(self, event: Button.Pressed) -> None:
+        seconds = int(event.button.id.removeprefix("expiry-"))
+        self.app.post_message(self.SetExpiry(seconds))
+        self.dismiss()
+
+    @on(Button.Pressed, "#close-expiry-btn")
+    def close_expiry(self) -> None:
+        self.dismiss()
+
+    class SetExpiry(TMessage):
+        def __init__(self, seconds: int) -> None:
+            super().__init__()
+            self.seconds = seconds
+
+
+class PanicWipeScreen(Screen):
+    """Require an explicit confirmation before deleting the active profile."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("PANIC WIPE", id="scan-title"),
+            Static(
+                "This permanently removes this device's identity, contacts, messages, "
+                "drafts, and relay queue, then closes the app.",
+                id="scan-status",
+            ),
+            Input(placeholder="Type WIPE to confirm", id="panic-wipe-confirm"),
+            Static("", id="login-error"),
+            Horizontal(
+                Button("Wipe This Device", variant="error", id="confirm-panic-wipe-btn"),
+                Button("Cancel", variant="default", id="cancel-panic-wipe-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#confirm-panic-wipe-btn")
+    def confirm_wipe(self) -> None:
+        if self.query_one("#panic-wipe-confirm", Input).value != "WIPE":
+            error = self.query_one("#login-error", Static)
+            error.update("Type WIPE to confirm removing this profile.")
+            error.styles.display = "block"
+            return
+        self.app.post_message(self.WipeProfile())
+
+    @on(Button.Pressed, "#cancel-panic-wipe-btn")
+    def cancel_wipe(self) -> None:
+        self.dismiss()
+
+    class WipeProfile(TMessage):
+        pass
+
+
+class EmergencyBroadcastScreen(Screen):
+    """Compose one signed, encrypted alert for every unblocked contact."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("EMERGENCY BROADCAST", id="scan-title"),
+            Static(
+                "This queues the same signed and encrypted alert for every unblocked contact.",
+                id="scan-status",
+            ),
+            Input(placeholder="Emergency message", id="broadcast-message", max_length=MAX_MESSAGE_LENGTH),
+            Static("", id="login-error"),
+            Horizontal(
+                Button("Send to Trusted Contacts", variant="error", id="send-broadcast-btn"),
+                Button("Cancel", variant="default", id="cancel-broadcast-btn"),
+                classes="scan-btn-row",
+            ),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, "#send-broadcast-btn")
+    def send_broadcast(self) -> None:
+        text = self.query_one("#broadcast-message", Input).value
+        if not text.strip() or not MessageEncryptor.is_valid_text(text):
+            error = self.query_one("#login-error", Static)
+            error.update("Enter a supported plain-text emergency message.")
+            error.styles.display = "block"
+            return
+        self.app.post_message(self.Broadcast(text))
+        self.dismiss()
+
+    @on(Button.Pressed, "#cancel-broadcast-btn")
+    def cancel_broadcast(self) -> None:
+        self.dismiss()
+
+    class Broadcast(TMessage):
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+
+class RelayDashboardScreen(Screen):
+    """Show packets this device is carrying for the mesh."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def __init__(self, entries: list[str]) -> None:
+        super().__init__()
+        self.entries = entries
+
+    def compose(self) -> ComposeResult:
+        lines = "\n\n".join(self.entries) if self.entries else "No messages are waiting for relay."
+        yield VerticalScroll(
+            Container(
+                Static("RELAY DASHBOARD", id="scan-title"),
+                Static(
+                    "Relay devices carry encrypted packets but cannot read their contents.",
+                    id="scan-status",
+                ),
+                Static(lines, markup=False),
+                Button("Close", variant="primary", id="close-relay-dashboard-btn"),
+                id="scan-container",
+            ),
+            id="login-scroll",
+        )
+
+    @on(Button.Pressed, "#close-relay-dashboard-btn")
+    def close_dashboard(self) -> None:
+        self.dismiss()
+
+
+class LanguageScreen(Screen):
+    """Select the primary terminal interface language."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("LANGUAGE", id="scan-title"),
+            Static("The main chat screen updates immediately. Some detailed dialogs remain in English.", id="scan-status"),
+            Button("English", classes="language-choice", id="language-en"),
+            Button("हिन्दी", classes="language-choice", id="language-hi"),
+            Button("Español", classes="language-choice", id="language-es"),
+            Button("Close", variant="default", id="close-language-btn"),
+            id="scan-container",
+        )
+
+    @on(Button.Pressed, ".language-choice")
+    def choose_language(self, event: Button.Pressed) -> None:
+        self.app.post_message(self.SetLanguage(event.button.id.removeprefix("language-")))
+        self.dismiss()
+
+    @on(Button.Pressed, "#close-language-btn")
+    def close_language(self) -> None:
+        self.dismiss()
+
+    class SetLanguage(TMessage):
+        def __init__(self, code: str) -> None:
+            super().__init__()
+            self.code = code
+
+
 class KeyboardHelpScreen(Screen):
     BINDINGS = [Binding("escape", "dismiss", "Close")]
 
@@ -743,9 +923,10 @@ class KeyboardHelpScreen(Screen):
 class ToolsScreen(Screen):
     BINDINGS = [Binding("escape", "dismiss", "Close")]
 
-    def __init__(self, contact_id: str | None) -> None:
+    def __init__(self, contact_id: str | None, contact_blocked: bool = False) -> None:
         super().__init__()
         self.contact_id = contact_id
+        self.contact_blocked = contact_blocked
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(
@@ -754,8 +935,19 @@ class ToolsScreen(Screen):
                 Button("Rename Contact", id="tool-rename", disabled=not self.contact_id),
                 Button("Retry Pending Messages", id="tool-retry", disabled=not self.contact_id),
                 Button("Remove Contact and Chat", variant="error", id="tool-remove", disabled=not self.contact_id),
+                Button(
+                    "Unblock Contact" if self.contact_blocked else "Block Contact",
+                    variant="default" if self.contact_blocked else "error",
+                    id="tool-block",
+                    disabled=not self.contact_id,
+                ),
+                Button("Message Expiry", id="tool-expiry"),
+                Button("Relay Dashboard", id="tool-relay"),
+                Button("Emergency Broadcast", variant="error", id="tool-broadcast"),
+                Button("Language", id="tool-language"),
                 Button("Export Conversation", id="tool-export", disabled=not self.contact_id),
                 Button("Encrypted Backup / Restore", id="tool-backup"),
+                Button("Panic Wipe", variant="error", id="tool-panic-wipe"),
                 Button("Disconnect", id="tool-disconnect"),
                 Button("Compact Mode", id="tool-compact"),
                 Button("Keyboard Help", id="tool-help"),
@@ -777,6 +969,26 @@ class ToolsScreen(Screen):
     def remove_contact(self) -> None:
         self._select("remove")
 
+    @on(Button.Pressed, "#tool-block")
+    def block_contact(self) -> None:
+        self._select("block")
+
+    @on(Button.Pressed, "#tool-expiry")
+    def message_expiry(self) -> None:
+        self._select("expiry")
+
+    @on(Button.Pressed, "#tool-relay")
+    def relay_dashboard(self) -> None:
+        self._select("relay")
+
+    @on(Button.Pressed, "#tool-broadcast")
+    def emergency_broadcast(self) -> None:
+        self._select("broadcast")
+
+    @on(Button.Pressed, "#tool-language")
+    def language(self) -> None:
+        self._select("language")
+
     @on(Button.Pressed, "#tool-export")
     def export(self) -> None:
         self._select("export")
@@ -784,6 +996,10 @@ class ToolsScreen(Screen):
     @on(Button.Pressed, "#tool-backup")
     def backup(self) -> None:
         self._select("backup")
+
+    @on(Button.Pressed, "#tool-panic-wipe")
+    def panic_wipe(self) -> None:
+        self._select("panic-wipe")
 
     @on(Button.Pressed, "#tool-disconnect")
     def disconnect(self) -> None:
@@ -834,16 +1050,16 @@ class MainScreen(Screen):
         )
         with Horizontal(id="main-layout"):
             with Vertical(id="sidebar"):
-                yield Static("  CONTACTS", id="sidebar-header")
-                yield Input(placeholder="Search contacts and messages", id="contact-search")
+                yield Static(self.app.t("contacts"), id="sidebar-header")
+                yield Input(placeholder=self.app.t("search"), id="contact-search")
                 yield ListView(id="contact-list")
-                yield Button("Connect Nearby", variant="primary", id="add-contact-btn")
-                yield Button("Advertise", variant="default", id="advertise-btn")
-                yield Button("My Keys", variant="default", id="show-keys-btn")
-                yield Button("Tools", variant="default", id="tools-btn")
+                yield Button(self.app.t("connect"), variant="primary", id="add-contact-btn")
+                yield Button(self.app.t("advertise"), variant="default", id="advertise-btn")
+                yield Button(self.app.t("keys"), variant="default", id="show-keys-btn")
+                yield Button(self.app.t("tools"), variant="default", id="tools-btn")
             with Vertical(id="right-panel"):
                 with Vertical(id="chat-panel"):
-                    yield Static("  Select a contact", id="chat-header", markup=False)
+                    yield Static(self.app.t("select_contact"), id="chat-header", markup=False)
                     yield Button("Load older messages", variant="default", id="load-older-btn")
                     yield ScrollableContainer(
                         Static(
@@ -856,11 +1072,11 @@ class MainScreen(Screen):
                     )
                     with Horizontal(id="message-input-bar"):
                         yield Input(
-                            placeholder="Type a message...",
+                            placeholder=self.app.t("type_message"),
                             id="message-input",
                             max_length=MAX_MESSAGE_LENGTH,
                         )
-                        yield Button("Send", variant="primary", id="send-btn")
+                        yield Button(self.app.t("send"), variant="primary", id="send-btn")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -868,6 +1084,8 @@ class MainScreen(Screen):
         self._visible_messages = []
         self._draft_timer = None
         self.query_one("#load-older-btn", Button).disabled = True
+        self.apply_language()
+        self.set_interval(60, self.app.expire_messages)
         self.app.post_message(self.RefreshRequest())
 
     def on_unmount(self) -> None:
@@ -942,7 +1160,8 @@ class MainScreen(Screen):
 
     @on(Button.Pressed, "#tools-btn")
     def handle_tools(self) -> None:
-        self.app.push_screen(ToolsScreen(self.selected_contact))
+        contact = self.app.db_manager.get_contact(self.selected_contact) if self.selected_contact else None
+        self.app.push_screen(ToolsScreen(self.selected_contact, bool(contact and contact.blocked)))
 
     @on(Button.Pressed, "#advertise-btn")
     def handle_advertise_btn(self) -> None:
@@ -971,6 +1190,19 @@ class MainScreen(Screen):
 
     def action_show_help(self) -> None:
         self.app.push_screen(KeyboardHelpScreen())
+
+    def apply_language(self) -> None:
+        """Refresh the main screen labels after changing language."""
+        self.query_one("#sidebar-header", Static).update(self.app.t("contacts"))
+        self.query_one("#contact-search", Input).placeholder = self.app.t("search")
+        self.query_one("#add-contact-btn", Button).label = self.app.t("connect")
+        self.query_one("#advertise-btn", Button).label = self.app.t("advertise")
+        self.query_one("#show-keys-btn", Button).label = self.app.t("keys")
+        self.query_one("#tools-btn", Button).label = self.app.t("tools")
+        self.query_one("#message-input", Input).placeholder = self.app.t("type_message")
+        self.query_one("#send-btn", Button).label = self.app.t("send")
+        if self.selected_contact is None:
+            self.query_one("#chat-header", Static).update(self.app.t("select_contact"))
 
     class ShowKeys(TMessage):
         pass
@@ -1012,7 +1244,12 @@ class MainScreen(Screen):
     # Maps ListView index → contact_id (avoids DuplicateIds with widget IDs)
     _contact_index_map: dict[int, str] = {}
 
-    def refresh_contacts(self, conversations: list[Conversation]) -> None:
+    def refresh_contacts(
+        self,
+        conversations: list[Conversation],
+        connected_contact_id: str | None = None,
+        relay_counts: dict[str, int] | None = None,
+    ) -> None:
         """Refresh the contact list sidebar."""
         lv = self.query_one("#contact-list", ListView)
 
@@ -1027,7 +1264,14 @@ class MainScreen(Screen):
         for idx, conv in enumerate(conversations):
             c = conv.contact
             unread = f" ({conv.unread_count})" if conv.unread_count else ""
-            name_text = f"{c.name or c.short_id}{unread}"
+            status = ""
+            if c.blocked:
+                status = " [blocked]"
+            elif c.id == connected_contact_id:
+                status = " [nearby]"
+            elif relay_counts and relay_counts.get(c.verify_key):
+                status = f" [relay: {relay_counts[c.verify_key]}]"
+            name_text = f"{c.name or c.short_id}{unread}{status}"
             preview = conv.last_message_preview
 
             self._contact_index_map[idx] = c.id
@@ -1048,8 +1292,13 @@ class MainScreen(Screen):
     def refresh_messages(self, contact: Contact, messages: list[ChatMessage]) -> None:
         """Refresh the chat panel with messages for the selected contact."""
         header = self.query_one("#chat-header", Static)
-        header.update(f"  {contact.name or contact.short_id}")
-        self.query_one("#message-input", Input).value = self.app.db_manager.get_draft(contact.id)
+        title = contact.name or contact.short_id
+        header.update(f"  {title}{' [blocked]' if contact.blocked else ''}")
+        message_input = self.query_one("#message-input", Input)
+        message_input.value = self.app.db_manager.get_draft(contact.id)
+        message_input.disabled = contact.blocked
+        message_input.placeholder = "Contact is blocked" if contact.blocked else self.app.t("type_message")
+        self.query_one("#send-btn", Button).disabled = contact.blocked
 
         container = self.query_one("#chat-messages", ScrollableContainer)
         container.remove_children()
@@ -1093,7 +1342,10 @@ class MainScreen(Screen):
 
     def clear_chat(self) -> None:
         self._visible_messages = []
-        self.query_one("#chat-header", Static).update("  Select a contact")
+        self.query_one("#chat-header", Static).update(self.app.t("select_contact"))
+        self.query_one("#message-input", Input).disabled = False
+        self.query_one("#message-input", Input).placeholder = self.app.t("type_message")
+        self.query_one("#send-btn", Button).disabled = False
         self.query_one("#chat-messages", ScrollableContainer).remove_children()
         self.query_one("#chat-messages", ScrollableContainer).mount(
             Static("Select a contact to start chatting", classes="empty-chat-placeholder", markup=False)
@@ -1343,6 +1595,7 @@ class PhantomApp(App):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.language = "en"
         self.key_manager = key_manager
         self.db_manager = db_manager
         self.transport = transport
@@ -1352,6 +1605,14 @@ class PhantomApp(App):
         self._pending_deliveries: dict[bytes, ChatMessage] = {}
         self._sending_message_ids: set[str] = set()
         self._connected_contact_id: str | None = None
+
+    def t(self, key: str) -> str:
+        """Return a translated primary-interface label."""
+        return _TEXT.get(self.language, _TEXT["en"]).get(key, _TEXT["en"].get(key, key))
+
+    def _load_language(self) -> None:
+        language = self.db_manager.get_setting("language", "en")
+        self.language = language if language in _TEXT else "en"
 
 
     def on_unmount(self) -> None:
@@ -1377,6 +1638,18 @@ class PhantomApp(App):
         self.notify("Profile deleted. Create a new identity to continue.", severity="information")
         if isinstance(self.screen, LoginScreen):
             self.switch_screen(CreateProfileScreen())
+
+    @on(PanicWipeScreen.WipeProfile)
+    @work(thread=False)
+    async def handle_panic_wipe(self) -> None:
+        if self.transport:
+            await self.transport.stop()
+        self._pending_deliveries.clear()
+        self._sending_message_ids.clear()
+        self._encryptors.clear()
+        self.db_manager.reset()
+        self.key_manager.reset()
+        self.exit(message="Profile removed. Restart Phantom Messenger to create a new profile.")
 
     @on(VerifyPeerScreen.TrustPeer)
     @work(thread=False)
@@ -1414,6 +1687,7 @@ class PhantomApp(App):
                 self.db_manager.restore_profile_data(snapshot)
                 self.db_manager.rekey(message.new_password)
                 self.key_manager.restore_private_bundle(key_bundle, message.new_password)
+                self._load_language()
                 self._encryptors.clear()
                 self._pending_deliveries.clear()
                 self._sending_message_ids.clear()
@@ -1452,6 +1726,8 @@ class PhantomApp(App):
             )
             return
 
+        self._load_language()
+
         self._enter_main()
 
     @on(LoginScreen.CreateIdentity)
@@ -1468,6 +1744,8 @@ class PhantomApp(App):
                 severity="error",
             )
             return
+
+        self._load_language()
 
         self.key_manager.generate()
         self.key_manager.save(passphrase)
@@ -1510,6 +1788,15 @@ class PhantomApp(App):
         else:
             self._set_connection_status("Disconnected. Pending messages will send when reconnected.")
 
+    def expire_messages(self) -> None:
+        """Periodically remove messages that passed the selected expiry period."""
+        if not self.db_manager.delete_expired_messages():
+            return
+        self._refresh_ui()
+        current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+        if current and current.selected_contact:
+            self._refresh_chat(current.selected_contact)
+
     @on(MainScreen.ContactSelected)
     def handle_contact_selected(self, message: MainScreen.ContactSelected) -> None:
         contact = self.db_manager.get_contact(message.contact_id)
@@ -1544,6 +1831,24 @@ class PhantomApp(App):
             self._retry_pending_messages(contact_id)
         elif message.action == "remove" and contact_id:
             self.push_screen(ConfirmRemoveContactScreen(contact_id))
+        elif message.action == "block" and contact_id:
+            contact = self.db_manager.get_contact(contact_id)
+            if contact:
+                self.db_manager.set_contact_blocked(contact_id, not contact.blocked)
+                state = "unblocked" if contact.blocked else "blocked"
+                self.notify(f"{contact.name or contact.short_id} is now {state}.", severity="information")
+                self._refresh_ui()
+                self._refresh_chat(contact_id)
+        elif message.action == "expiry":
+            self.push_screen(MessageExpiryScreen())
+        elif message.action == "relay":
+            self.push_screen(RelayDashboardScreen(self._relay_dashboard_entries()))
+        elif message.action == "broadcast":
+            self.push_screen(EmergencyBroadcastScreen())
+        elif message.action == "language":
+            self.push_screen(LanguageScreen())
+        elif message.action == "panic-wipe":
+            self.push_screen(PanicWipeScreen())
         elif message.action == "export" and contact_id:
             self.handle_export_conversation(MainScreen.ExportConversation(contact_id))
         elif message.action == "backup":
@@ -1557,6 +1862,46 @@ class PhantomApp(App):
         elif message.action == "help":
             self.push_screen(KeyboardHelpScreen())
 
+    @on(MessageExpiryScreen.SetExpiry)
+    def handle_message_expiry(self, message: MessageExpiryScreen.SetExpiry) -> None:
+        self.db_manager.set_message_expiry(message.seconds)
+        label = "never" if message.seconds == 0 else f"after {message.seconds // 3600} hour(s)"
+        self.notify(f"Messages will expire {label}.", severity="information")
+        self._refresh_ui()
+        current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+        if current and current.selected_contact:
+            self._refresh_chat(current.selected_contact)
+
+    @on(LanguageScreen.SetLanguage)
+    def handle_language(self, message: LanguageScreen.SetLanguage) -> None:
+        if message.code not in _TEXT:
+            return
+        self.language = message.code
+        self.db_manager.set_setting("language", message.code)
+        current = next((screen for screen in self.screen_stack if isinstance(screen, MainScreen)), None)
+        if current:
+            current.apply_language()
+
+    @on(EmergencyBroadcastScreen.Broadcast)
+    def handle_emergency_broadcast(self, message: EmergencyBroadcastScreen.Broadcast) -> None:
+        contacts = [contact for contact in self.db_manager.get_all_contacts() if not contact.blocked]
+        if not contacts:
+            self.notify("There are no unblocked contacts to receive this broadcast.", severity="warning")
+            return
+        for contact in contacts:
+            chat_message = ChatMessage(
+                contact_id=contact.id,
+                content=message.text,
+                direction=MessageDirection.SENT,
+                status=MessageStatus.PENDING,
+            )
+            self.db_manager.save_message(chat_message)
+            if self.transport and self.transport.is_connected():
+                self._send_encrypted(contact, chat_message)
+        self._set_connection_status(self._connection_status_text)
+        self._refresh_ui()
+        self.notify(f"Emergency broadcast queued for {len(contacts)} contact(s).", severity="information")
+
     @on(MainScreen.RetryPending)
     def handle_retry_pending(self, message: MainScreen.RetryPending) -> None:
         self._retry_pending_messages(message.contact_id)
@@ -1567,7 +1912,7 @@ class PhantomApp(App):
             self.notify("Connect to this contact before retrying queued messages.", severity="warning")
             return
         contact = self.db_manager.get_contact(contact_id)
-        if not contact:
+        if not contact or contact.blocked:
             return
         pending = self.db_manager.get_undelivered_messages(contact_id)
         awaiting_ack = {item.id for item in self._pending_deliveries.values()}
@@ -1632,6 +1977,9 @@ class PhantomApp(App):
     def handle_send_message(self, message: MainScreen.SendMessage) -> None:
         contact = self.db_manager.get_contact(message.contact_id)
         if contact is None:
+            return
+        if contact.blocked:
+            self.notify("Unblock this contact before sending a message.", severity="warning")
             return
 
         # Create message record
@@ -1808,7 +2156,7 @@ class PhantomApp(App):
         delivery_id, signature = payload[:32], payload[32:]
         message = self._pending_deliveries.get(delivery_id)
         contact = self.db_manager.get_contact(message.contact_id) if message else None
-        if contact is None:
+        if contact is None or contact.blocked:
             return
         try:
             from nacl.encoding import HexEncoder
@@ -1828,6 +2176,10 @@ class PhantomApp(App):
     async def _handle_relay_packet(self, payload: bytes) -> None:
         if self._connected_contact_id is None:
             logger.warning("Ignoring relay packet from an unverified connection.")
+            return
+        peer = self.db_manager.get_contact(self._connected_contact_id)
+        if peer is None or peer.blocked:
+            logger.info("Ignoring relay packet from a blocked or unknown contact.")
             return
         envelope = RelayEnvelope.decode(payload)
         is_new = self.db_manager.remember_relay(envelope.packet_id)
@@ -1897,6 +2249,9 @@ class PhantomApp(App):
         elif contact.verify_key != verify_key:
             self.notify("The contact identity key changed. Contact was not updated.", severity="error")
             return
+        if contact.blocked:
+            logger.info("Ignoring connection from blocked contact %s", contact.short_id)
+            return
         contact.last_seen = time.time()
         self.db_manager.save_contact(contact)
         self._connected_contact_id = contact.id
@@ -1922,6 +2277,8 @@ class PhantomApp(App):
             return
         awaiting_ack = {message.id for message in self._pending_deliveries.values()}
         for target in self.db_manager.get_all_contacts():
+            if target.blocked:
+                continue
             for message in self.db_manager.get_undelivered_messages(target.id):
                 if not self.transport.is_connected():
                     return
@@ -1960,6 +2317,8 @@ class PhantomApp(App):
         matched_contact = None
 
         for contact in contacts:
+            if contact.blocked:
+                continue
             if expected_source and contact.verify_key != expected_source:
                 continue
             try:
@@ -2078,6 +2437,7 @@ class PhantomApp(App):
         else:
             status = "Disconnected. Pending messages will send when reconnected."
         self._set_connection_status(status)
+        self._refresh_ui()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2110,6 +2470,37 @@ class PhantomApp(App):
                     pass
                 break
 
+    def _relay_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for _, raw, _, _ in self.db_manager.get_relay_queue_details():
+            try:
+                destination = RelayEnvelope.decode(raw).destination
+            except ValueError:
+                continue
+            counts[destination] = counts.get(destination, 0) + 1
+        return counts
+
+    def _relay_dashboard_entries(self) -> list[str]:
+        contacts = {contact.verify_key: contact for contact in self.db_manager.get_all_contacts()}
+        public_keys = {contact.public_key: contact for contact in contacts.values()}
+        entries = []
+        for _, raw, via, created_at in self.db_manager.get_relay_queue_details():
+            try:
+                envelope = RelayEnvelope.decode(raw)
+            except ValueError:
+                continue
+            destination = contacts.get(envelope.destination)
+            destination_name = destination.name if destination else envelope.destination[:8]
+            previous_peer = public_keys.get(via)
+            route = "ready to forward" if not via else f"last sent through {previous_peer.name if previous_peer else via[:8]}"
+            age = max(0, int(time.time() - created_at))
+            kind = "Message" if envelope.kind == "message" else "Delivery receipt"
+            entries.append(
+                f"{kind} for {destination_name}\n"
+                f"{route}; {MAX_HOPS - envelope.hops_left}/{MAX_HOPS} hops used; waiting {age}s"
+            )
+        return entries
+
     def _chunk_message(self, msg_type: MessageType, payload: bytes) -> list[Chunk]:
         max_payload = (
             self.transport.max_chunk_payload
@@ -2129,7 +2520,11 @@ class PhantomApp(App):
         if query is None:
             query = current.query_one("#contact-search", Input).value
         conversations = self.db_manager.get_conversations(query)
-        current.refresh_contacts(conversations)
+        current.refresh_contacts(
+            conversations,
+            connected_contact_id=self._connected_contact_id,
+            relay_counts=self._relay_counts(),
+        )
 
     def _refresh_chat(self, contact_id: str) -> None:
         """Refresh the chat panel for a specific contact."""

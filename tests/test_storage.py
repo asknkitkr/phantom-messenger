@@ -77,6 +77,14 @@ class TestDatabaseContacts:
         db.delete_contact(contact.id)
         assert db.get_contact(contact.id) is None
 
+    def test_block_contact_persists(self, db):
+        contact = Contact(name="Blocked", public_key="i" * 64, verify_key="j" * 64)
+        db.save_contact(contact)
+
+        db.set_contact_blocked(contact.id, True)
+
+        assert db.get_contact(contact.id).blocked is True
+
 
 class TestDatabaseMessages:
     """Tests for message CRUD operations."""
@@ -155,6 +163,21 @@ class TestDatabaseMessages:
 
         messages = db.get_messages(contact.id, limit=3)
         assert len(messages) == 3
+
+    def test_message_expiry_removes_only_old_messages(self, db, contact):
+        db.save_message(
+            Message(contact_id=contact.id, content="old", timestamp=time.time() - 120)
+        )
+        db.save_message(Message(contact_id=contact.id, content="new", timestamp=time.time()))
+
+        db.set_message_expiry(60)
+
+        assert [message.content for message in db.get_messages(contact.id)] == ["new"]
+
+    def test_settings_are_persisted(self, db):
+        db.set_setting("language", "hi")
+
+        assert db.get_setting("language") == "hi"
 
     def test_delete_contact_cascades_messages(self, db, contact):
         db.save_message(
