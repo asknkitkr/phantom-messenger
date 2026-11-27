@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 phantom = "messenger.__main__:main"
+phantom-sim = "messenger.simulator:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

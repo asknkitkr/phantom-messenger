@@ -74,6 +74,42 @@ from messenger.transport.mesh import RelayEnvelope
 
 logger = logging.getLogger(__name__)
 
+_TEXT = {
+    "en": {
+        "contacts": "  CONTACTS",
+        "search": "Search contacts and messages",
+        "connect": "Connect Nearby",
+        "advertise": "Advertise",
+        "keys": "My Keys",
+        "tools": "Tools",
+        "type_message": "Type a message...",
+        "send": "Send",
+        "select_contact": "  Select a contact",
+    },
+    "hi": {
+        "contacts": "  संपर्क",
+        "search": "संपर्क और संदेश खोजें",
+        "connect": "पास के डिवाइस से जुड़ें",
+        "advertise": "प्रसारण शुरू करें",
+        "keys": "मेरी कुंजियां",
+        "tools": "उपकरण",
+        "type_message": "संदेश लिखें...",
+        "send": "भेजें",
+        "select_contact": "  संपर्क चुनें",
+    },
+    "es": {
+        "contacts": "  CONTACTOS",
+        "search": "Buscar contactos y mensajes",
+        "connect": "Conectar cerca",
+        "advertise": "Anunciar",
+        "keys": "Mis claves",
+        "tools": "Herramientas",
+        "type_message": "Escribe un mensaje...",
+        "send": "Enviar",
+        "select_contact": "  Selecciona un contacto",
+    },
+}
+
 
 # ======================================================================
 # CSS Stylesheet

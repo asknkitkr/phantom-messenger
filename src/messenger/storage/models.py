@@ -36,6 +36,7 @@ class Contact:
     verify_key: str = ""    # Ed25519 verify key (hex)
     last_seen: float = 0.0  # Unix timestamp of last activity
     created_at: float = field(default_factory=time.time)
+    blocked: bool = False
 
     @property
     def short_id(self) -> str:

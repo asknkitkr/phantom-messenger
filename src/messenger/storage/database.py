@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     public_key  TEXT NOT NULL DEFAULT '',
     verify_key  TEXT NOT NULL DEFAULT '',
     last_seen   REAL NOT NULL DEFAULT 0,
-    created_at  REAL NOT NULL DEFAULT 0
+    created_at  REAL NOT NULL DEFAULT 0,
+    blocked     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -93,6 +94,11 @@ CREATE TABLE IF NOT EXISTS relay_queue (
 CREATE TABLE IF NOT EXISTS relay_seen (
     packet_id TEXT PRIMARY KEY,
     seen_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -189,6 +195,7 @@ class DatabaseManager:
             return False
 
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self._conn.commit()
         if os.name != "nt":
             os.chmod(self._db_path, 0o600)
@@ -199,6 +206,14 @@ class DatabaseManager:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def _migrate_schema(self) -> None:
+        """Apply small, backwards-compatible schema additions."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(contacts)")}
+        if "blocked" not in columns:
+            self._db.execute(
+                "ALTER TABLE contacts ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0"
+            )
 
     def reset(self) -> None:
         """Close and remove the saved profile database."""
@@ -225,13 +240,14 @@ class DatabaseManager:
         """Insert or update a contact."""
         self._db.execute(
             """
-            INSERT INTO contacts (id, name, public_key, verify_key, last_seen, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO contacts (id, name, public_key, verify_key, last_seen, created_at, blocked)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 public_key=excluded.public_key,
                 verify_key=excluded.verify_key,
-                last_seen=excluded.last_seen
+                last_seen=excluded.last_seen,
+                blocked=excluded.blocked
             """,
             (
                 contact.id,
@@ -240,6 +256,7 @@ class DatabaseManager:
                 contact.verify_key,
                 contact.last_seen,
                 contact.created_at,
+                1 if contact.blocked else 0,
             ),
         )
         self._db.commit()
@@ -247,7 +264,7 @@ class DatabaseManager:
     def get_contact(self, contact_id: str) -> Contact | None:
         """Fetch a single contact by ID."""
         row = self._db.execute(
-            "SELECT id, name, public_key, verify_key, last_seen, created_at "
+            "SELECT id, name, public_key, verify_key, last_seen, created_at, blocked "
             "FROM contacts WHERE id=?",
             (contact_id,),
         ).fetchone()
@@ -256,7 +273,7 @@ class DatabaseManager:
     def get_contact_by_public_key(self, public_key: str) -> Contact | None:
         """Find a contact by their X25519 public key."""
         row = self._db.execute(
-            "SELECT id, name, public_key, verify_key, last_seen, created_at "
+            "SELECT id, name, public_key, verify_key, last_seen, created_at, blocked "
             "FROM contacts WHERE public_key=?",
             (public_key,),
         ).fetchone()
@@ -265,7 +282,7 @@ class DatabaseManager:
     def get_all_contacts(self) -> list[Contact]:
         """Return all contacts ordered by last activity."""
         rows = self._db.execute(
-            "SELECT id, name, public_key, verify_key, last_seen, created_at "
+            "SELECT id, name, public_key, verify_key, last_seen, created_at, blocked "
             "FROM contacts ORDER BY last_seen DESC"
         ).fetchall()
         return [self._row_to_contact(r) for r in rows]
@@ -273,6 +290,13 @@ class DatabaseManager:
     def delete_contact(self, contact_id: str) -> None:
         """Delete a contact and all associated messages."""
         self._db.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+        self._db.commit()
+
+    def set_contact_blocked(self, contact_id: str, blocked: bool) -> None:
+        """Block or unblock a contact without deleting local history."""
+        self._db.execute(
+            "UPDATE contacts SET blocked=? WHERE id=?", (1 if blocked else 0, contact_id)
+        )
         self._db.commit()
 
     # ------------------------------------------------------------------
@@ -315,6 +339,7 @@ class DatabaseManager:
             limit: Maximum number of messages to return.
             before: Only return messages before this Unix timestamp (pagination).
         """
+        self.delete_expired_messages()
         if before is not None:
             rows = self._db.execute(
                 "SELECT id, contact_id, content, timestamp, direction, status, is_read "
@@ -360,10 +385,41 @@ class DatabaseManager:
         ).fetchone()
         return int(row[0])
 
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self._db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._db.execute(
+            "INSERT INTO settings(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self._db.commit()
+
+    def get_message_expiry(self) -> int:
+        try:
+            return max(0, int(self.get_setting("message_expiry_seconds", "0")))
+        except ValueError:
+            return 0
+
+    def set_message_expiry(self, seconds: int) -> None:
+        self.set_setting("message_expiry_seconds", str(max(0, seconds)))
+        self.delete_expired_messages()
+
+    def delete_expired_messages(self) -> int:
+        """Remove messages older than the configured expiry period."""
+        expiry = self.get_message_expiry()
+        if not expiry:
+            return 0
+        cursor = self._db.execute("DELETE FROM messages WHERE timestamp < ?", (time.time() - expiry,))
+        self._db.commit()
+        return cursor.rowcount
+
     def export_profile_data(self) -> dict:
         return {
             "contacts": [list(row) for row in self._db.execute(
-                "SELECT id, name, public_key, verify_key, last_seen, created_at FROM contacts"
+                "SELECT id, name, public_key, verify_key, last_seen, created_at, blocked FROM contacts"
             )],
             "messages": [list(row) for row in self._db.execute(
                 "SELECT id, contact_id, content, timestamp, direction, status, is_read FROM messages"
@@ -380,6 +436,9 @@ class DatabaseManager:
             "relay_seen": [list(row) for row in self._db.execute(
                 "SELECT packet_id, seen_at FROM relay_seen"
             )],
+            "settings": [list(row) for row in self._db.execute(
+                "SELECT key, value FROM settings"
+            )],
         }
 
     def restore_profile_data(self, data: dict) -> None:
@@ -387,8 +446,11 @@ class DatabaseManager:
             self._db.execute("DELETE FROM contacts")
             self._db.execute("DELETE FROM relay_queue")
             self._db.execute("DELETE FROM relay_seen")
+            self._db.execute("DELETE FROM settings")
             self._db.executemany(
-                "INSERT INTO contacts VALUES (?, ?, ?, ?, ?, ?)", data["contacts"]
+                "INSERT INTO contacts(id, name, public_key, verify_key, last_seen, created_at, blocked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [tuple(row) + (0,) if len(row) == 6 else row for row in data["contacts"]],
             )
             self._db.executemany(
                 "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)", data["messages"]
@@ -405,6 +467,9 @@ class DatabaseManager:
             )
             self._db.executemany(
                 "INSERT INTO relay_seen VALUES (?, ?)", data.get("relay_seen", [])
+            )
+            self._db.executemany(
+                "INSERT INTO settings VALUES (?, ?)", data.get("settings", [])
             )
 
     def rekey(self, passphrase: str) -> None:
@@ -426,9 +491,10 @@ class DatabaseManager:
 
     def get_conversations(self, query: str = "") -> list[Conversation]:
         """Fetch sidebar summaries in one query instead of loading 50 messages per contact."""
+        self.delete_expired_messages()
         rows = self._db.execute(
             """
-            SELECT c.id, c.name, c.public_key, c.verify_key, c.last_seen, c.created_at,
+            SELECT c.id, c.name, c.public_key, c.verify_key, c.last_seen, c.created_at, c.blocked,
                    m.id, m.contact_id, m.content, m.timestamp, m.direction, m.status, m.is_read,
                    COALESCE(u.unread_count, 0)
             FROM contacts c
@@ -453,13 +519,13 @@ class DatabaseManager:
         ).fetchall()
         conversations = []
         for row in rows:
-            contact = self._row_to_contact(row[:6])
-            latest = self._row_to_message(row[6:13]) if row[6] else None
+            contact = self._row_to_contact(row[:7])
+            latest = self._row_to_message(row[7:14]) if row[7] else None
             conversations.append(
                 Conversation(
                     contact=contact,
                     messages=[latest] if latest else [],
-                    unread_total=row[13],
+                    unread_total=row[14],
                 )
             )
         return conversations
@@ -514,6 +580,13 @@ class DatabaseManager:
             "SELECT packet_id, envelope, via FROM relay_queue ORDER BY created_at"
         ).fetchall()
 
+    def get_relay_queue_details(self) -> list[tuple[str, bytes, str, float]]:
+        """Return relay packets and their last forwarding attempt for the dashboard."""
+        self.get_queued_relays()
+        return self._db.execute(
+            "SELECT packet_id, envelope, via, created_at FROM relay_queue ORDER BY created_at"
+        ).fetchall()
+
     def delete_queued_relay(self, packet_id: str) -> None:
         self._db.execute("DELETE FROM relay_queue WHERE packet_id=?", (packet_id,))
         self._db.commit()
@@ -531,6 +604,7 @@ class DatabaseManager:
             verify_key=row[3],
             last_seen=row[4],
             created_at=row[5],
+            blocked=bool(row[6]),
         )
 
     @staticmethod

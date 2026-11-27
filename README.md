@@ -179,6 +179,19 @@ python -m messenger --debug
 3. Press **Enter** or click **Send**
 4. Messages must be plain text. Emoji and some special characters are not supported.
 
+### Simulator
+
+Run two virtual peers on one machine without Bluetooth hardware:
+
+```bash
+python -m messenger.simulator
+```
+
+It creates temporary encrypted profiles for Alice and Bob, sends one message through the
+real in-memory transport, checks the signed delivery acknowledgement, then removes the
+temporary data. Supply `--message "Hello"` to change the message, or `--data-dir ./sim-data`
+to keep the simulation profiles for inspection.
+
 ## Key Bindings
 
 | Key | Action |
